@@ -4,7 +4,7 @@ import type { PageAudit } from "../packages/contracts/src/types.js";
 
 const page = (overrides: Partial<PageAudit> = {}): PageAudit => ({
   schemaVersion: "1.0.0", url: "https://example.com/", fetchedAt: new Date(0).toISOString(),
-  statusCode: 200, finalUrl: "https://example.com/", contentType: "text/html",
+  statusCode: 200, finalUrl: "https://example.com/", redirectChain: [], contentType: "text/html",
   title: "Title", metaDescription: "Description", canonical: "https://example.com/",
   robots: null, headings: { h1: ["Title"], h2Count: 1, h3Count: 0 },
   images: { total: 1, missingAlt: 0, missingDimensions: 0 },

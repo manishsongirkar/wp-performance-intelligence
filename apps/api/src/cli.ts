@@ -1,11 +1,13 @@
 import { auditPage } from "../../../packages/audit-core/src/audit.js";
 import { parseUrlCsv } from "../../../packages/url-import/src/csv.js";
+import { loadConfig, loadDotEnv } from "./config.js";
 import { readFile, writeFile } from "node:fs/promises";
 
 async function main() {
   const [, , command, arg1, arg2] = process.argv;
   if (command === "audit" && arg1) {
-    const result = await auditPage(arg1);
+    loadDotEnv();
+    const result = await auditPage(arg1, loadConfig().fetch);
     const output = arg2 ?? "wpi-audit.json";
     await writeFile(output, JSON.stringify(result, null, 2));
     console.log(`Audited ${arg1}; ${result.findings.length} findings written to ${output}`);

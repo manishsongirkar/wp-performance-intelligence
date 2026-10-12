@@ -27,6 +27,7 @@ export interface PageAudit {
   fetchedAt: string;
   statusCode: number;
   finalUrl: string;
+  redirectChain: string[];
   contentType: string | null;
   title: string | null;
   metaDescription: string | null;
