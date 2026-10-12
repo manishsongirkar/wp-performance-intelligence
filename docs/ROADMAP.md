@@ -19,9 +19,10 @@
 
 ## Milestone 2 — Performance browser engine
 - [x] Playwright browser measurement (`/api/measure`, local mode only)
-- [ ] Lighthouse integration (Speed Index, TBT, scores)
+- [x] Lighthouse integration (`/api/lighthouse`: scores, Speed Index, TBT, opportunities; local mode only)
 - [x] Desktop/mobile profiles and repeated samples
 - [ ] LCP element, resource timing and browser trace artifacts
+- [x] HTML report (`pnpm wpi report`) with Lighthouse standalone reports and copyable fix examples
 - [x] Median/min/max summary with run metadata (browser, viewport, UA, throttling)
 
 ## Milestone 3 — Bulk jobs and migration intelligence

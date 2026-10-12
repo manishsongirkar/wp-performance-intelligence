@@ -109,3 +109,30 @@ export interface BrowserMeasurement {
   summary: Partial<Record<MetricKey, MetricSummary>>;
   limitations: string[];
 }
+
+export interface LighthouseRun {
+  ok: boolean;
+  error?: string;
+  scores: { performance: number | null; accessibility: number | null; bestPractices: number | null; seo: number | null }; // 0-100
+  metrics: { fcpMs: number | null; lcpMs: number | null; tbtMs: number | null; cls: number | null; speedIndexMs: number | null; ttiMs: number | null };
+  opportunities: Array<{ id: string; title: string; savingsMs: number }>;
+  runWarnings: string[];
+}
+
+/** Lighthouse lab result (simulated throttling by default). Not field data. */
+export interface LighthouseMeasurement {
+  schemaVersion: "1.0.0";
+  source: "lab";
+  engine: "lighthouse";
+  url: string;
+  finalUrl: string | null;
+  measuredAt: string;
+  profile: BrowserProfileName;
+  status: "complete" | "partial" | "failed";
+  metadata: { lighthouseVersion: string; browser: string; throttlingMethod: string; formFactor: string; runs: number };
+  runs: LighthouseRun[];
+  summary: Record<string, MetricSummary>;
+  limitations: string[];
+  /** Full Lighthouse HTML report per run; only present when requested (large). */
+  htmlReports?: string[];
+}

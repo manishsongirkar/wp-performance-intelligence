@@ -24,10 +24,25 @@ pnpm install
 cp .env.example .env     # optional; loaded from the directory you start the API in
 pnpm dev                 # API on http://127.0.0.1:4178
 pnpm dev:web             # dashboard on http://127.0.0.1:5173 (separate terminal)
-pnpm audit audit https://example.com out.json   # CLI
+pnpm wpi audit https://example.com out.json   # CLI (not "pnpm audit": that is a built-in pnpm command)
+pnpm wpi report --audit https://example.com --lighthouse https://example.com   # HTML report on ~/Desktop
 ```
 
 Checks: `pnpm typecheck` (backend `.ts` and frontend `.tsx`), `pnpm test`, `pnpm build` (type-check + production build of the dashboard). CI (`.github/workflows/ci.yml`) runs all three.
+
+## HTML reports
+
+```bash
+pnpm wpi report --audit https://example.com/ --compare https://old.example.com/,https://new.example.com/ \
+  --measure https://example.com/ --lighthouse https://example.com/ --runs 3 --profile mobile
+```
+
+Writes `~/Desktop/<site>_<YYYY-MM-DD_HH-mm-ss>/` (override the parent with `--out DIR`) containing:
+- `report.html`: findings, old/new differences, browser measurements, Lighthouse score summary, and **example fixes with a copy-to-clipboard button on every code block** (generic templates, not verified against your code). All site-derived text is HTML-escaped and the page has a restrictive CSP.
+- `lighthouse-N-runM.html`: Lighthouse's own standalone report for each run (same look as Chrome DevTools / PageSpeed).
+- `data.json`: the raw results.
+
+`--measure` and `--lighthouse` need `WPI_MODE=local` and Chromium (`pnpm exec playwright install chromium`). For LocalWP **https** sites, Node does not trust the LocalWP certificate by default; start with `NODE_USE_SYSTEM_CA=1` so Node uses the macOS keychain (TLS verification stays on).
 
 ## Configuration (environment or `.env`)
 

@@ -9,6 +9,7 @@ import type { ComparisonResult, PageAudit } from "../../../packages/contracts/sr
 import { exportSchema } from "../../../packages/contracts/src/schemas.js";
 import { createLimiter, SafeFetchError, type SafeFetchErrorCode, type Resolver, type Transport } from "../../../packages/safe-fetch/src/index.js";
 import { measurePage } from "../../../packages/browser-audit/src/measure.js";
+import { runLighthouse } from "../../../packages/browser-audit/src/lighthouse.js";
 import { isLoopbackHost, type Config } from "./config.js";
 
 const auditSchema = z.object({ url: z.string().url().max(2048) });
@@ -24,11 +25,12 @@ const STATUS: Record<SafeFetchErrorCode, number> = {
 const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /** `deps` lets tests inject DNS and transport; production uses the real ones. */
-export function buildApp(config: Config, deps: { resolve?: Resolver; transport?: Transport; logger?: boolean; measure?: typeof measurePage } = {}) {
+export function buildApp(config: Config, deps: { resolve?: Resolver; transport?: Transport; logger?: boolean; measure?: typeof measurePage; lighthouse?: typeof runLighthouse } = {}) {
   const app = Fastify({ logger: deps.logger ?? true, bodyLimit: 1_000_000 });
   const limit = createLimiter(config.maxConcurrent);
   const browserLimit = createLimiter(1); // one browser job at a time
   const measure = deps.measure ?? measurePage;
+  const lh = deps.lighthouse ?? runLighthouse;
   const fetchOpts = { ...config.fetch, resolve: deps.resolve, transport: deps.transport };
 
   app.addHook("onRequest", async (request, reply) => {
@@ -90,6 +92,15 @@ export function buildApp(config: Config, deps: { resolve?: Resolver; transport?:
     if (config.fetch.policy.mode !== "local") return reply.code(403).send({ error: "Browser measurement is only available in local mode.", code: "BROWSER_DISABLED" });
     try {
       return { result: await browserLimit(() => measure(parsed.data.url, { policy: config.fetch.policy, profile: parsed.data.profile, runs: parsed.data.runs, resolve: deps.resolve })) };
+    } catch (error) { return failure(request, reply, error); }
+  });
+
+  app.post("/api/lighthouse", async (request, reply) => {
+    const parsed = measureSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid request", details: parsed.error.flatten() });
+    if (config.fetch.policy.mode !== "local") return reply.code(403).send({ error: "Lighthouse is only available in local mode.", code: "BROWSER_DISABLED" });
+    try {
+      return { result: await browserLimit(() => lh(parsed.data.url, { policy: config.fetch.policy, profile: parsed.data.profile, runs: parsed.data.runs, resolve: deps.resolve })) };
     } catch (error) { return failure(request, reply, error); }
   });
 

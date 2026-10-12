@@ -8,6 +8,7 @@ JSON over HTTP. Default `http://127.0.0.1:4178`. If `WPI_API_TOKEN` is set, send
 | `POST /api/audit` | `{ "url": "https://example.com/" }` | `{ result: PageAudit }` |
 | `POST /api/compare` | `{ "oldUrl": "...", "newUrl": "..." }` | `{ result: ComparisonResult }` |
 | `POST /api/measure` | `{ "url": "...", "profile": "desktop"\|"mobile", "runs": 1-5 }` (local mode only) | `{ result: BrowserMeasurement }` |
+| `POST /api/lighthouse` | same body as `/api/measure` (local mode only; default profile `desktop`) | `{ result: LighthouseMeasurement }` |
 | `POST /api/import/csv` | `{ "csv": "url\nhttps://example.com/" }` (max 500 KB) | `{ result: { mode, urls, pairs, errors } }` |
 | `POST /api/export/xlsx` | `{ "results": [PageAudit \| ComparisonResult] }` (max 5000) | `.xlsx` file |
 
@@ -15,7 +16,9 @@ Types: `packages/contracts/src/types.ts`; export input is validated by `packages
 
 `PageAudit.redirectChain` lists redirect hops that were followed; `statusCode`/`finalUrl` describe the final response. HTTP 4xx/5xx pages are audited and get an `http.error-status` finding. Non-HTML responses return an audit with no page checks.
 
-`/api/measure` runs real Chromium (lab data, no throttling, cold cache per run) and returns per-run values plus median/min/max and run metadata. It is not field Core Web Vitals. It returns 403 `BROWSER_DISABLED` in public mode because the browser resolves DNS itself (no address pinning). Run `pnpm exec playwright install chromium` once first. Lighthouse metrics are not included yet.
+`/api/measure` runs real Chromium (lab data, no throttling, cold cache per run) and returns per-run values plus median/min/max and run metadata. It is not field Core Web Vitals. It returns 403 `BROWSER_DISABLED` in public mode because the browser resolves DNS itself (no address pinning). Run `pnpm exec playwright install chromium` once first. 
+
+`/api/lighthouse` runs Lighthouse (simulated throttling) on Playwright's Chromium and returns, per run, category scores (performance, accessibility, best practices, SEO), FCP, LCP, TBT, CLS, Speed Index, TTI and the top opportunities by estimated savings, plus median/min/max over runs and the Lighthouse version. Lab data only; same local-mode restriction and the same single-browser-job limit as `/api/measure`.
 
 ## Errors
 
