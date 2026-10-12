@@ -110,6 +110,12 @@ export interface BrowserMeasurement {
   limitations: string[];
 }
 
+/** Per-resource evidence from a failing Lighthouse audit (capped, strings truncated). */
+export interface EvidenceItem {
+  url?: string; selector?: string; snippet?: string;
+  totalBytes?: number; wastedBytes?: number; wastedMs?: number; durationMs?: number; scriptingMs?: number;
+}
+
 export interface LighthouseRun {
   ok: boolean;
   error?: string;
@@ -117,6 +123,8 @@ export interface LighthouseRun {
   metrics: { fcpMs: number | null; lcpMs: number | null; tbtMs: number | null; cls: number | null; speedIndexMs: number | null; ttiMs: number | null };
   opportunities: Array<{ id: string; title: string; savingsMs: number }>;
   runWarnings: string[];
+  /** Keyed by Lighthouse audit id, e.g. "unused-css-rules". Only audits that failed or list items. */
+  evidence: Record<string, EvidenceItem[]>;
 }
 
 /** Lighthouse lab result (simulated throttling by default). Not field data. */

@@ -23,6 +23,7 @@
 - [x] Desktop/mobile profiles and repeated samples
 - [ ] LCP element, resource timing and browser trace artifacts
 - [x] HTML report (`pnpm wpi report`) with Lighthouse standalone reports and copyable fix examples
+- [x] Evidence-based exact fixes (LCP/FCP/TBT/unused CSS+JS/images/CLS) and `--baseline` before/after deltas
 - [x] Median/min/max summary with run metadata (browser, viewport, UA, throttling)
 
 ## Milestone 3 — Bulk jobs and migration intelligence
