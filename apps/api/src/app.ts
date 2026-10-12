@@ -8,10 +8,12 @@ import { createAuditWorkbook } from "../../../packages/reports/src/xlsx.js";
 import type { ComparisonResult, PageAudit } from "../../../packages/contracts/src/types.js";
 import { exportSchema } from "../../../packages/contracts/src/schemas.js";
 import { createLimiter, SafeFetchError, type SafeFetchErrorCode, type Resolver, type Transport } from "../../../packages/safe-fetch/src/index.js";
+import { measurePage } from "../../../packages/browser-audit/src/measure.js";
 import { isLoopbackHost, type Config } from "./config.js";
 
 const auditSchema = z.object({ url: z.string().url().max(2048) });
 const compareSchema = z.object({ oldUrl: z.string().url().max(2048), newUrl: z.string().url().max(2048) });
+const measureSchema = z.object({ url: z.string().url().max(2048), profile: z.enum(["desktop", "mobile"]).default("desktop"), runs: z.number().int().min(1).max(5).default(3) });
 const csvSchema = z.object({ csv: z.string().min(1).max(500_000) });
 
 const STATUS: Record<SafeFetchErrorCode, number> = {
@@ -22,9 +24,11 @@ const STATUS: Record<SafeFetchErrorCode, number> = {
 const safeEqual = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /** `deps` lets tests inject DNS and transport; production uses the real ones. */
-export function buildApp(config: Config, deps: { resolve?: Resolver; transport?: Transport; logger?: boolean } = {}) {
+export function buildApp(config: Config, deps: { resolve?: Resolver; transport?: Transport; logger?: boolean; measure?: typeof measurePage } = {}) {
   const app = Fastify({ logger: deps.logger ?? true, bodyLimit: 1_000_000 });
   const limit = createLimiter(config.maxConcurrent);
+  const browserLimit = createLimiter(1); // one browser job at a time
+  const measure = deps.measure ?? measurePage;
   const fetchOpts = { ...config.fetch, resolve: deps.resolve, transport: deps.transport };
 
   app.addHook("onRequest", async (request, reply) => {
@@ -76,6 +80,16 @@ export function buildApp(config: Config, deps: { resolve?: Resolver; transport?:
     try {
       const [oldAudit, newAudit] = await limit(() => Promise.all([auditPage(parsed.data.oldUrl, fetchOpts), auditPage(parsed.data.newUrl, fetchOpts)]), 2);
       return { result: comparePages(oldAudit, newAudit) };
+    } catch (error) { return failure(request, reply, error); }
+  });
+
+  app.post("/api/measure", async (request, reply) => {
+    const parsed = measureSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "Invalid request", details: parsed.error.flatten() });
+    // The browser resolves DNS itself (no address pinning), so it is trusted-local only.
+    if (config.fetch.policy.mode !== "local") return reply.code(403).send({ error: "Browser measurement is only available in local mode.", code: "BROWSER_DISABLED" });
+    try {
+      return { result: await browserLimit(() => measure(parsed.data.url, { policy: config.fetch.policy, profile: parsed.data.profile, runs: parsed.data.runs, resolve: deps.resolve })) };
     } catch (error) { return failure(request, reply, error); }
   });
 
