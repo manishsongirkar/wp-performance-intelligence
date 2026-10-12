@@ -1,0 +1,6 @@
+{
+  "name": "@wpi/web",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite --host 127.0.0.1" }
+}
