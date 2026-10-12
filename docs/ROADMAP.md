@@ -18,10 +18,11 @@
 - [ ] Not done: hosted-grade isolation (separate worker/egress firewall); the in-process policy is defence in depth, not a sandbox
 
 ## Milestone 2 — Performance browser engine
-- [ ] Playwright and Lighthouse integration
-- [ ] Desktop/mobile profiles and repeated samples
+- [x] Playwright browser measurement (`/api/measure`, local mode only)
+- [ ] Lighthouse integration (Speed Index, TBT, scores)
+- [x] Desktop/mobile profiles and repeated samples
 - [ ] LCP element, resource timing and browser trace artifacts
-- [ ] Median/variance comparison with reproducibility metadata
+- [x] Median/min/max summary with run metadata (browser, viewport, UA, throttling)
 
 ## Milestone 3 — Bulk jobs and migration intelligence
 - [ ] CSV upload UI and batch job queue
