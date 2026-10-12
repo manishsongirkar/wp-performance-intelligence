@@ -42,6 +42,10 @@ Writes `~/Desktop/<site>_<YYYY-MM-DD_HH-mm-ss>/` (override the parent with `--ou
 - `lighthouse-N-runM.html`: Lighthouse's own standalone report for each run (same look as Chrome DevTools / PageSpeed).
 - `data.json`: the raw results.
 
+**Exact fixes.** For each Lighthouse page the report adds an "Exact fixes for this page" block for LCP, FCP, TBT, unused CSS/JS, images and CLS. The code is built from the measured evidence of that run: the real LCP image URL (preload and `fetchpriority`), the real render-blocking and heavy script files (async/defer lists with sizes), unused CSS/JS files (with a warning when a file is mostly used and must not be dequeued), and the exact image files to convert or regenerate. Fixes are scoped to the audited URL, every site-derived value is allow-listed and escaped before it reaches code, and the generated PHP and bash are syntax-checked in the tests. They are still untested on your site: apply them on staging, then re-run with the baseline.
+
+**Before/after.** `--baseline <previous report folder>` adds deltas to the new report. Each report's "Verify" block contains the exact re-run command. Changes inside the baseline's own min–max range, or too small to matter, are shown as "no clear change".
+
 `--measure` and `--lighthouse` need `WPI_MODE=local` and Chromium (`pnpm exec playwright install chromium`). For LocalWP **https** sites, Node does not trust the LocalWP certificate by default; start with `NODE_USE_SYSTEM_CA=1` so Node uses the macOS keychain (TLS verification stays on).
 
 ## Configuration (environment or `.env`)

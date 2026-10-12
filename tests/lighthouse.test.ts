@@ -10,7 +10,7 @@ import type { LighthouseRun } from "../packages/contracts/src/types.js";
 
 const run = (perf: number | null, lcp: number | null, ok = true): LighthouseRun => ({
   ok, scores: { performance: perf, accessibility: 90, bestPractices: 100, seo: 80 },
-  metrics: { fcpMs: 500, lcpMs: lcp, tbtMs: 0, cls: 0, speedIndexMs: 600, ttiMs: 700 }, opportunities: [], runWarnings: []
+  metrics: { fcpMs: 500, lcpMs: lcp, tbtMs: 0, cls: 0, speedIndexMs: 600, ttiMs: 700 }, opportunities: [], runWarnings: [], evidence: {}
 });
 
 describe("summarizeLighthouse", () => {
