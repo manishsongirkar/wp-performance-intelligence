@@ -9,12 +9,13 @@
 - [x] Excel workbook exporter
 - [x] Unit test starter
 
-## Milestone 1 — Reliable fetch and audit safety
-- [ ] Connection-time SSRF protection and redirect policy
-- [ ] Content length/time limits enforced while streaming
-- [ ] Retry/backoff and per-host concurrency controls
-- [ ] Robots/sitemap discovery with crawl budgets
-- [ ] Expand fixture coverage and audit rule catalog
+## Milestone 1 — Reliable fetch and audit safety (in progress; code complete locally, not yet reviewed/merged)
+- [x] Connection-time IP validation (resolve once, pin the validated address), redirect policy, deadline covering the body, streaming size limit
+- [x] Explicit `local` / `public` modes; loopback bind by default; token required for non-loopback bind
+- [x] Startup config validation, `.env` loading, CORS/Host checks, concurrency cap, validated export, formula-injection protection
+- [x] Type-check covers `.tsx`; CI workflow; tests for policy, fetch, API, CSV, comparison, export
+- [ ] Not done: per-host rate limits, retry/backoff, robots/sitemap discovery, wider audit rule catalog
+- [ ] Not done: hosted-grade isolation (separate worker/egress firewall); the in-process policy is defence in depth, not a sandbox
 
 ## Milestone 2 — Performance browser engine
 - [ ] Playwright and Lighthouse integration

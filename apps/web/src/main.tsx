@@ -31,7 +31,7 @@ function App() {
       <article className="panel full"><div className="panel-icon">▤</div><h2>Import multiple URLs</h2><p className="muted">Paste CSV with a <code>url</code> column or <code>old_url,new_url</code> mapping.</p><textarea rows={4} value={csv} onChange={e=>setCsv(e.target.value)} placeholder={"old_url,new_url,group\\nhttps://old.example.com/,https://new.example.com/,home"} /><button className="secondary" disabled={busy || !csv.trim()} onClick={()=>void call("/api/import/csv", { csv })}>Validate CSV</button></article>
     </section>
     {error && <div className="error">{error}</div>}
-    {result && <section className="results"><div className="results-head"><h2>Results</h2><button className="secondary" onClick={()=>navigator.clipboard.writeText(JSON.stringify(result,null,2))}>Copy JSON</button></div><pre>{JSON.stringify(result, null, 2)}</pre></section>}
+    {result !== null && <section className="results"><div className="results-head"><h2>Results</h2><button className="secondary" onClick={()=>navigator.clipboard.writeText(JSON.stringify(result,null,2))}>Copy JSON</button></div><pre>{JSON.stringify(result, null, 2)}</pre></section>}
     <footer>Early MVP · HTML audit and migration comparison only. Lighthouse/browser metrics, persistent history, secure public hosting and approved code patches are not implemented yet.</footer>
   </main>;
 }

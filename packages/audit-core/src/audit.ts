@@ -1,78 +1,53 @@
 import { load } from "cheerio";
 import { randomUUID } from "node:crypto";
+import { safeFetch, type SafeFetchOptions } from "../../safe-fetch/src/index.js";
 import type { Finding, PageAudit, Severity } from "../../contracts/src/types.js";
 
-export interface FetchPageOptions {
-  timeoutMs?: number;
-  maxBytes?: number;
-  allowedHosts?: string[];
-}
+export type FetchPageOptions = Omit<SafeFetchOptions, "wantBody">;
 
 function makeFinding(input: Omit<Finding, "id" | "status">): Finding {
   return { ...input, id: randomUUID(), status: "open" };
 }
 
-function normalizeHost(hostname: string): string {
-  return hostname.toLowerCase().replace(/^www\./, "");
-}
-
-/**
- * Early-MVP fetch policy. This checks host allowlists before the request, but it is NOT
- * sufficient protection for a public deployment; DNS rebinding and redirect validation
- * require connection-time enforcement in an isolated worker.
- */
-export async function auditPage(inputUrl: string, options: FetchPageOptions = {}): Promise<PageAudit> {
-  const parsed = new URL(inputUrl);
-  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Only HTTP and HTTPS URLs are supported.");
-  if (parsed.username || parsed.password) throw new Error("URLs containing credentials are not allowed.");
-  const allowlist = options.allowedHosts;
-  if (allowlist?.length && !allowlist.some((h) => normalizeHost(parsed.hostname) === normalizeHost(h) || parsed.hostname.endsWith(`.${h}`))) {
-    throw new Error(`Host ${parsed.hostname} is not in the configured allowlist.`);
+/** Fetches through the network policy (see packages/safe-fetch) and runs the HTML checks. */
+export async function auditPage(inputUrl: string, options: FetchPageOptions): Promise<PageAudit> {
+  const fetched = await safeFetch(inputUrl, { ...options, wantBody: (_s, h) => /text\/html/i.test(h["content-type"] ?? "") });
+  const contentType = fetched.headers["content-type"] ?? null;
+  const { finalUrl, redirectChain } = fetched;
+  const early: Finding[] = [];
+  if (redirectChain.length) early.push(makeFinding({
+    ruleId: "http.redirect",
+    category: "migration",
+    severity: "medium",
+    confidence: "high",
+    title: "Page redirects",
+    description: `The requested URL redirected ${redirectChain.length} time(s) before the final response.`,
+    url: inputUrl,
+    evidence: redirectChain.map((to, i) => ({ type: "header" as const, description: `Redirect hop ${i + 1}`, value: to })),
+    recommendation: "Confirm the redirect points to the intended equivalent page, avoid chains, and link directly to the final URL."
+  }));
+  if (fetched.status >= 400) early.push(makeFinding({
+    ruleId: "http.error-status",
+    category: "migration",
+    severity: "high",
+    confidence: "high",
+    title: `Page returned HTTP ${fetched.status}`,
+    description: `The final URL responded with an HTTP error status (${fetched.status}).`,
+    url: inputUrl,
+    evidence: [{ type: "header", description: "HTTP status", value: fetched.status }],
+    recommendation: "Confirm the URL should exist; restore it or redirect it to the equivalent page."
+  }));
+  if (!/text\/html/i.test(contentType ?? "")) {
+    return emptyAudit(inputUrl, fetched.status, contentType, early, ["Response was not HTML; page-level SEO checks were skipped."], finalUrl, redirectChain);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 15000);
-  let response: Response;
-  try {
-    response = await fetch(parsed.toString(), {
-      signal: controller.signal,
-      redirect: "manual",
-      headers: { "user-agent": "WP-Performance-Intelligence/0.1 (+authorized website audit)" }
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  const contentType = response.headers.get("content-type");
-  const finalUrl = parsed.toString();
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location");
-    const finding = makeFinding({
-      ruleId: "http.redirect",
-      category: "migration",
-      severity: "medium",
-      confidence: "high",
-      title: "Page redirects",
-      description: "The requested URL returned a redirect. Redirect destination is recorded for manual or follow-up validation.",
-      url: inputUrl,
-      evidence: [{ type: "header", description: "HTTP redirect response", value: location }],
-      recommendation: "Confirm the redirect points to the intended equivalent page and does not create a chain or loop."
-    });
-    return emptyAudit(inputUrl, response.status, contentType, [finding], location ? [ `Redirect destination: ${new URL(location, inputUrl).toString()}` ] : []);
-  }
-  if (!contentType?.toLowerCase().includes("text/html")) {
-    return emptyAudit(inputUrl, response.status, contentType, [], ["Response was not HTML; page-level SEO checks were skipped."]);
-  }
-
-  const maxBytes = options.maxBytes ?? 2_000_000;
-  const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error(`HTML response exceeded configured limit (${maxBytes} bytes).`);
+  const text = fetched.body.toString("utf8");
   const $ = load(text);
-  const findings: Finding[] = [];
+  const findings: Finding[] = [...early];
   const title = $("title").first().text().trim() || null;
   const metaDescription = $('meta[name="description" i]').attr("content")?.trim() || null;
   const canonical = $('link[rel~="canonical" i]').attr("href")?.trim() || null;
-  const robots = $('meta[name="robots" i]').attr("content")?.trim() || response.headers.get("x-robots-tag");
+  const robots = $('meta[name="robots" i]').attr("content")?.trim() || fetched.headers["x-robots-tag"];
   const h1 = $("h1").map((_, el) => $(el).text().trim()).get().filter(Boolean);
   const h2Count = $("h2").length;
   const h3Count = $("h3").length;
@@ -84,8 +59,9 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions = {}
   let external = 0;
   anchors.each((_, el) => {
     try {
-      const target = new URL($(el).attr("href")!, inputUrl);
-      if (target.hostname === parsed.hostname) internal++; else external++;
+      const target = new URL($(el).attr("href")!, finalUrl);
+      if (!/^https?:$/.test(target.protocol)) return;
+      if (target.hostname === new URL(finalUrl).hostname) internal++; else external++;
     } catch { /* Ignore non-URL links such as mailto: and javascript:. */ }
   });
   const jsonLdScripts = $('script[type="application/ld+json"]');
@@ -141,8 +117,9 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions = {}
     schemaVersion: "1.0.0",
     url: inputUrl,
     fetchedAt: new Date().toISOString(),
-    statusCode: response.status,
+    statusCode: fetched.status,
     finalUrl,
+    redirectChain,
     contentType,
     title,
     metaDescription,
@@ -181,9 +158,9 @@ function seoFinding(url: string, ruleId: string, title: string, severity: Severi
   });
 }
 
-function emptyAudit(url: string, statusCode: number, contentType: string | null, findings: Finding[], limitations: string[]): PageAudit {
+function emptyAudit(url: string, statusCode: number, contentType: string | null, findings: Finding[], limitations: string[], finalUrl = url, redirectChain: string[] = []): PageAudit {
   return {
-    schemaVersion: "1.0.0", url, fetchedAt: new Date().toISOString(), statusCode, finalUrl: url, contentType,
+    schemaVersion: "1.0.0", url, fetchedAt: new Date().toISOString(), statusCode, finalUrl, redirectChain, contentType,
     title: null, metaDescription: null, canonical: null, robots: null,
     headings: { h1: [], h2Count: 0, h3Count: 0 },
     images: { total: 0, missingAlt: 0, missingDimensions: 0 },

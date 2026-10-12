@@ -1,6 +1,12 @@
 import ExcelJS from "exceljs";
 import type { PageAudit, ComparisonResult } from "../../contracts/src/types.js";
 
+/** Neutralises spreadsheet formula injection: text starting with = + - @ or a control char is prefixed with an apostrophe. */
+export function safeCell(value: unknown): unknown {
+  return typeof value === "string" && /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+const safeRow = (row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, safeCell(v)]));
+
 export async function createAuditWorkbook(results: Array<PageAudit | ComparisonResult>): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "WP Performance Intelligence";
@@ -14,8 +20,8 @@ export async function createAuditWorkbook(results: Array<PageAudit | ComparisonR
     { header: "Generated At", key: "date", width: 28 }
   ];
   for (const item of results) {
-    if ("differences" in item) summary.addRow({ type: "Comparison", url: `${item.oldUrl} → ${item.newUrl}`, status: item.status, count: item.differences.length, date: item.comparedAt });
-    else summary.addRow({ type: "Audit", url: item.url, status: item.statusCode, count: item.findings.length, date: item.fetchedAt });
+    if ("differences" in item) summary.addRow(safeRow({ type: "Comparison", url: `${item.oldUrl} → ${item.newUrl}`, status: item.status, count: item.differences.length, date: item.comparedAt }));
+    else summary.addRow(safeRow({ type: "Audit", url: item.url, status: item.statusCode, count: item.findings.length, date: item.fetchedAt }));
   }
   styleHeader(summary);
 
@@ -33,9 +39,9 @@ export async function createAuditWorkbook(results: Array<PageAudit | ComparisonR
   ];
   for (const item of results) {
     if ("differences" in item) {
-      for (const d of item.differences) findings.addRow({ url: item.newUrl, ruleId: d.id, category: d.category, severity: d.severity, confidence: "", title: d.title, description: `Old: ${JSON.stringify(d.oldValue)} | New: ${JSON.stringify(d.newValue)}`, recommendation: d.recommendation, status: item.status });
+      for (const d of item.differences) findings.addRow(safeRow({ url: item.newUrl, ruleId: d.id, category: d.category, severity: d.severity, confidence: "", title: d.title, description: `Old: ${JSON.stringify(d.oldValue)} | New: ${JSON.stringify(d.newValue)}`, recommendation: d.recommendation, status: item.status }));
     } else {
-      for (const f of item.findings) findings.addRow({ url: f.url, ruleId: f.ruleId, category: f.category, severity: f.severity, confidence: f.confidence, title: f.title, description: f.description, recommendation: f.recommendation, status: f.status });
+      for (const f of item.findings) findings.addRow(safeRow({ url: f.url, ruleId: f.ruleId, category: f.category, severity: f.severity, confidence: f.confidence, title: f.title, description: f.description, recommendation: f.recommendation, status: f.status }));
     }
   }
   styleHeader(findings);
