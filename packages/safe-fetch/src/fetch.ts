@@ -1,5 +1,6 @@
 import http from "node:http";
 import https from "node:https";
+import zlib from "node:zlib";
 import { SafeFetchError, validateDestination, systemResolver, type NetworkPolicy, type Resolver } from "./policy.js";
 
 export interface TransportRequest { url: URL; address: string; family: 4 | 6; headers: Record<string, string>; signal: AbortSignal }
@@ -33,7 +34,12 @@ export const nodeTransport: Transport = ({ url, address, family, headers, signal
     }, (res) => {
       const out: Record<string, string> = {};
       for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out[k] = Array.isArray(v) ? v.join(", ") : v;
-      resolve({ status: res.statusCode ?? 0, headers: out, body: res, destroy: () => res.destroy() });
+      // Compression is not requested (identity), but a server may send it anyway: decode so the audit sees HTML, not bytes.
+      // The size limit counts DECODED bytes in safeFetch, so a decompression bomb is cut off like any oversized body.
+      const enc = (out["content-encoding"] ?? "").toLowerCase();
+      const decoder = enc === "gzip" || enc === "x-gzip" ? zlib.createGunzip() : enc === "deflate" ? zlib.createInflate() : enc === "br" ? zlib.createBrotliDecompress() : undefined;
+      const body: AsyncIterable<Uint8Array> = decoder ? res.pipe(decoder) : res;
+      resolve({ status: res.statusCode ?? 0, headers: out, body, destroy: () => { res.destroy(); decoder?.destroy(); } });
     });
     req.on("error", reject);
     req.end();
@@ -54,10 +60,19 @@ export async function safeFetch(inputUrl: string, opts: SafeFetchOptions): Promi
     for (;;) {
       const dest = await validateDestination(url, policy, resolve);
       if (ctl.signal.aborted) throw new SafeFetchError("TIMEOUT", "Request timed out.");
-      const res = current = await transport({
-        url, ...dest, signal: ctl.signal,
-        headers: { "user-agent": "WP-Performance-Intelligence/0.1 (+authorized website audit)", accept: "text/html,*/*;q=0.8" }
-      });
+      // Try each VALIDATED address in turn (e.g. "localhost" resolves to ::1 and 127.0.0.1 but a dev server may listen on only one).
+      // No address outside the validated set is ever used, so this does not weaken the DNS-rebinding protection.
+      let res: TransportResponse | undefined, lastError: unknown;
+      for (const a of dest.all) {
+        try {
+          res = current = await transport({
+            url, address: a.address, family: a.family, signal: ctl.signal,
+            headers: { "user-agent": "WP-Performance-Intelligence/0.1 (+authorized website audit)", accept: "text/html,*/*;q=0.8", "accept-encoding": "identity" }
+          });
+          break;
+        } catch (e) { lastError = e; if (ctl.signal.aborted) break; }
+      }
+      if (!res) throw lastError;
       const location = res.headers["location"];
       if (REDIRECTS.has(res.status) && location) {
         res.destroy();

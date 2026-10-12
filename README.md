@@ -2,20 +2,22 @@
 
 Local-first, web-based WordPress performance, SEO, migration comparison and regression intelligence.
 
-## Current status: early MVP foundation
+## Current status
 
-Implemented:
-- Local Fastify API: health, URL audit, old/new comparison, CSV import, Excel export.
-- Fetched-HTML checks: title, description, canonical, robots, headings, images, links, JSON-LD.
-- A network-policy layer for all outbound fetches (`packages/safe-fetch`): connection-time IP validation, manual redirect handling, total deadline, streaming size limit.
-- Old-vs-new comparison, CSV URL lists and old/new mappings, validated Excel export.
+Implemented (local use):
+- **HTML audit** of fetched pages (title, description, canonical, robots from meta/googlebot/`X-Robots-Tag`, headings, images, links, JSON-LD) and **old-vs-new comparison**.
+- **Lighthouse** (13.5, the version PageSpeed Insights runs) and **browser measurement** (Chromium via Playwright) for mobile and/or desktop, with repeated runs, median and range.
+- A **web dashboard** that runs reports in the background, shows **progress graphs** for every tested point over time, and lets you open, export and compare old reports.
+- **HTML / JSON / Excel reports** with evidence-based fixes that are checked against what the page already does.
+- A **network-policy layer** for all outbound fetches (`packages/safe-fetch`): connection-time IP validation, manual redirects, total deadline, streaming size limit.
 
-Not implemented yet: Lighthouse/Playwright/real browser metrics, field Core Web Vitals, bulk jobs, persistent history, source-code mapping, automatic fixes, authenticated multi-user hosting. This is not production-ready and not a PageSpeed Insights replacement.
+Not implemented: field Core Web Vitals (real-user data), bulk jobs and crawling, source-code mapping, applying fixes automatically, multi-user hosting. It does **not** call Google's PageSpeed Insights API (see "PageSpeed Insights-style results"). This is not production-ready for public hosting.
 
 ## Requirements
 
-- Node.js 22 or newer (uses `process.loadEnvFile`)
-- pnpm 10 (pinned in `package.json` as `packageManager`)
+- Node.js **22.19 or newer** (Lighthouse 13 requires it; the API also uses `process.loadEnvFile`)
+- pnpm 10 (pinned in `package.json` as `packageManager`) or plain `npm run <script>`
+- For Lighthouse and browser measurement: `npx playwright install chromium` once
 
 ## Run locally
 
@@ -26,9 +28,10 @@ pnpm dev                 # API on http://127.0.0.1:4178
 pnpm dev:web             # dashboard on http://127.0.0.1:5173 (separate terminal)
 pnpm wpi audit https://example.com out.json   # CLI (not "pnpm audit": that is a built-in pnpm command)
 pnpm wpi report --audit https://example.com --lighthouse https://example.com   # HTML report on ~/Desktop
+npm run ui                # dashboard + API on http://127.0.0.1:4178 (builds the dashboard first)
 ```
 
-Checks: `pnpm typecheck` (backend `.ts` and frontend `.tsx`), `pnpm test`, `pnpm build` (type-check + production build of the dashboard). CI (`.github/workflows/ci.yml`) runs all three.
+Checks: `pnpm typecheck` (backend `.ts` and frontend `.tsx`), `pnpm test`, `pnpm build` (type-check + production build of the dashboard). CI (`.github/workflows/ci.yml`) installs Chromium and runs `pnpm test` and `pnpm build`; the browser, Lighthouse and dashboard tests need Chromium and skip themselves when it is missing.
 
 ## Web interface
 
@@ -37,29 +40,37 @@ NODE_USE_SYSTEM_CA=1 npm run ui     # builds the dashboard, starts the API, prin
 # open http://127.0.0.1:4178/
 ```
 
-Enter URLs, optional old/new comparisons (or import a CSV), device profile, runs per page and an optional earlier report as the baseline, then press **Run report**. The report runs in the background (one at a time, extra requests queue); the card below the form shows live step progress and, when it finishes, the report link with **Copy link** and **Export** buttons: JSON (`data.json`), Spreadsheet (`.xlsx`: Summary, Findings, Performance, Opportunities) and HTML (`report.html`). Reports are saved to `WPI_REPORTS_DIR` (default `~/Desktop`), in a `<site>_<date-time>` folder, and appear under "Earlier reports" after a restart. Local mode only; jobs are held in memory and cancelling stops a job before its next step, not mid-step. For UI development run `npm run dev` and `npm run dev:web` separately.
+Enter URLs, optional old/new comparisons (or import a CSV), tick **Mobile** and/or **Desktop** (both are tested in one report), choose runs per page (5 gives the steadiest scores) and an optional earlier report as the baseline, then press **Run report**. The report runs in the background (one at a time, extra requests queue); the card below the form shows live step progress and, when it finishes, the report link with **Copy link** and **Export** buttons: JSON (`data.json`), Spreadsheet (`.xlsx`: Summary, Findings, Performance, Opportunities) and HTML (`report.html`). If every check failed, the job is shown as failed (its report, listing the failures, is still reachable).
+
+**Progress over time.** Below the jobs, every saved report is charted by default: one chart per measured point (Lighthouse Performance, Accessibility, Best Practices, SEO, LCP, FCP, TBT, CLS, Speed Index; browser LCP, TTFB and page weight; HTML-audit issues), one line per URL and device (solid = mobile, dashed = desktop), shaded with the Good / Needs improvement / Poor bands. Filter by URL or device, hover a point for its value and date, and click it (or press Enter) to open that report. **Report history** lists every report newest first with **View details**, exports and **Use as baseline**.
+
+Reports are saved to `WPI_REPORTS_DIR` (default `~/Desktop`), one `<site>_<date-time>` folder each; they survive restarts and are never overwritten. The dashboard is local mode only; jobs are held in memory, and cancelling stops a job before its next step, not mid-step. If you set `WPI_API_TOKEN` the dashboard cannot authenticate, so leave it unset for local use. For UI development run `npm run dev` and `npm run dev:web` separately.
 
 ## HTML reports
 
 ```bash
 pnpm wpi report --audit https://example.com/ --compare https://old.example.com/,https://new.example.com/ \
-  --measure https://example.com/ --lighthouse https://example.com/ --runs 3 --profile mobile
+  --measure https://example.com/ --lighthouse https://example.com/ --runs 3 --profile mobile --profile desktop
 ```
+
+`--profile` may be repeated (or `both`) to test mobile and desktop in one report; the default is desktop. A `--compare` URL cannot contain a comma (it separates OLD,NEW).
 
 Writes `~/Desktop/<site>_<YYYY-MM-DD_HH-mm-ss>/` (override the parent with `--out DIR`) containing:
 - `report.html`: findings, old/new differences, browser measurements, Lighthouse score summary, and **example fixes with a copy-to-clipboard button on every code block** (generic templates, not verified against your code). All site-derived text is HTML-escaped and the page has a restrictive CSP.
-- `lighthouse-N-runM.html`: Lighthouse's own standalone report for each run (same look as Chrome DevTools / PageSpeed).
+- `lighthouse-N-<mobile|desktop>-runM.html`: Lighthouse's own standalone report for each run (same look as Chrome DevTools / PageSpeed).
 - `data.json`: the raw results.
 
 **Exact fixes.** For each Lighthouse page the report adds an "Exact fixes for this page" block for LCP, FCP, TBT, unused CSS/JS, images and CLS. The code is built from the measured evidence of that run: the real LCP image URL (preload and `fetchpriority`), the real render-blocking and heavy script files (async/defer lists with sizes), unused CSS/JS files (with a warning when a file is mostly used and must not be dequeued), and the exact image files to convert or regenerate. Fixes are scoped to the audited URL, every site-derived value is allow-listed and escaped before it reaches code, and the generated PHP and bash are syntax-checked in the tests. They are still untested on your site: apply them on staging, then re-run with the baseline.
 
-**PageSpeed Insights alignment.** Lighthouse runs with PageSpeed Insights' lab conditions (mobile: Moto G Power emulation, simulated slow 4G with 150 ms RTT / 1.6 Mbps and 4× CPU slowdown; desktop: the desktop preset), recorded in each report. Metric ratings use the same Good / Needs improvement / Poor bands, and the Performance section has PageSpeed-style Opportunities, Diagnostics and a passed-audit count. Add `--psi` (UI: "Also compare with Google PageSpeed Insights") to fetch Google's own result for **public** URLs: its lab scores next to yours, plus real-user (CrUX) Core Web Vitals. This sends the URL to Google, so it is opt-in; set `WPI_PSI_API_KEY` to avoid quota errors. Local/private URLs (LocalWP) cannot be tested by PageSpeed Insights.
+**PageSpeed Insights-style results.** Lighthouse runs locally with PageSpeed Insights' lab conditions (mobile: Moto G Power emulation, simulated slow 4G with 150 ms RTT / 1.6 Mbps and 4× CPU slowdown; desktop: the desktop preset) and the same Lighthouse version (13.5), recorded in each report. Metric ratings use the same Good / Needs improvement / Poor bands, and the Performance section has PageSpeed-style Opportunities, Diagnostics and a passed-audit count. The tool does not call Google's PageSpeed Insights API.
+
+**Why your score may differ from pagespeed.web.dev.** PageSpeed Insights tests **once**, from Google's data centres, on slower servers (CPU benchmark about 500–900; a modern laptop scores about 3,800). This tool takes the **median of several runs** on your machine. Single runs vary a lot: on one staging page the same machine scored 83, 85 and 95 within minutes. Each report therefore shows the lowest–highest score under each gauge, warns when Performance varied by 10+ points, shows this machine's CPU benchmark, and explains the differences. Expect differences of roughly 5–10 points; compare medians over time (the progress charts do this), not single numbers. Local and private URLs (LocalWP) cannot be tested by PageSpeed Insights at all.
 
 **Why is LCP slow?** Each Lighthouse page shows the LCP phase breakdown (TTFB, Load Delay, Load Time, Render Delay). When Load Delay dominates and several heavy images load at the same time, the report runs one extra what-if Lighthouse pass with those images blocked and shows the measured LCP difference. The exact fixes detect what is already applied (preload, `fetchpriority`, lazy-loading, `srcset`) and do not repeat it. The tool does not recommend changes that could hurt other breakpoints (for example `fetchpriority="low"` on images that may be above the fold on desktop).
 
 **Before/after.** `--baseline <previous report folder>` adds deltas to the new report. Each report's "Verify" block contains the exact re-run command. Changes inside the baseline's own min–max range, or too small to matter, are shown as "no clear change".
 
-`--measure` and `--lighthouse` need `WPI_MODE=local` and Chromium (`pnpm exec playwright install chromium`). For LocalWP **https** sites, Node does not trust the LocalWP certificate by default; start with `NODE_USE_SYSTEM_CA=1` so Node uses the macOS keychain (TLS verification stays on).
+`--measure` and `--lighthouse` need `WPI_MODE=local` and Chromium (`npx playwright install chromium`). For LocalWP **https** sites, Node does not trust the LocalWP certificate by default; start with `NODE_USE_SYSTEM_CA=1` so Node uses the macOS keychain (TLS verification stays on).
 
 ## Configuration (environment or `.env`)
 

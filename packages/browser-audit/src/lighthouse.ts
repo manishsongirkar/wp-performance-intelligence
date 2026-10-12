@@ -5,6 +5,7 @@ import desktopConfig from "lighthouse/core/config/desktop-config.js";
 import { createServer } from "node:net";
 import { validateDestination, SafeFetchError, type NetworkPolicy, type Resolver } from "../../safe-fetch/src/index.js";
 import { median } from "./measure.js";
+import { parseSrcset } from "../../audit-core/src/srcset.js";
 import type { EvidenceItem, LighthouseExperiment, BrowserProfileName, LighthouseMeasurement, LighthouseRun, MetricSummary } from "../../contracts/src/types.js";
 
 export interface LighthouseOptions { policy: NetworkPolicy; profile?: BrowserProfileName; runs?: number; resolve?: Resolver; /** Run one extra what-if pass when the evidence points at competing images (adds ~10 s per URL). */ whatIf?: boolean; /** Also return Lighthouse's own standalone HTML report for each run. */ keepReports?: boolean }
@@ -19,20 +20,24 @@ const r1 = (n: number | null | undefined) => (typeof n === "number" ? Math.round
 
 // Audits whose item lists drive exact fixes. "table" audits (no score penalty) are kept when they list items.
 // Informational table audits that carry evidence even though they "pass".
-const ALWAYS_KEEP = new Set(["long-tasks", "bootup-time", "network-requests"]);
+const ALWAYS_KEEP = new Set(["long-tasks", "bootup-time", "network-requests", "largest-contentful-paint-element"]);
 const EVIDENCE_AUDITS = ["unused-css-rules", "unused-javascript", "render-blocking-resources", "modern-image-formats", "uses-responsive-images", "uses-optimized-images",
-  "offscreen-images", "unminified-css", "unminified-javascript", "font-display", "unsized-images", "long-tasks", "bootup-time", "server-response-time", "prioritize-lcp-image", "uses-rel-preconnect", "largest-contentful-paint-element", "network-requests"];
+  "offscreen-images", "unminified-css", "unminified-javascript", "font-display", "unsized-images", "long-tasks", "bootup-time", "server-response-time", "prioritize-lcp-image", "uses-rel-preconnect", "largest-contentful-paint-element", "network-requests", "layout-shifts"];
 const cut = (v: unknown, n = 300) => (typeof v === "string" ? v.slice(0, n) : undefined);
 const numOrU = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v * 10) / 10 : undefined);
 
-type RawItem = { url?: unknown; node?: { selector?: unknown; snippet?: unknown; boundingRect?: { width?: unknown; height?: unknown } }; transferSize?: unknown; resourceType?: unknown; priority?: unknown; totalBytes?: unknown; wastedBytes?: unknown; wastedMs?: unknown; duration?: unknown; scripting?: unknown; responseTime?: unknown; items?: RawItem[] };
-function toEvidence(id: string, items: RawItem[]): EvidenceItem[] {
+export type RawItem = { url?: unknown; node?: { selector?: unknown; snippet?: unknown; boundingRect?: { width?: unknown; height?: unknown } }; transferSize?: unknown; resourceType?: unknown; priority?: unknown; totalBytes?: unknown; wastedBytes?: unknown; wastedMs?: unknown; duration?: unknown; scripting?: unknown; responseTime?: unknown; items?: RawItem[] };
+export function toEvidence(id: string, items: RawItem[]): EvidenceItem[] {
   // The LCP audit nests its element inside a list of tables.
   let flat = id === "largest-contentful-paint-element" ? items.flatMap((i) => i.items ?? []).filter((i) => i.node).slice(0, 1) : items;
   // The heaviest requests are what compete with the LCP image for bandwidth.
-  if (id === "network-requests") flat = [...flat].sort((a, b) => Number(b.transferSize ?? 0) - Number(a.transferSize ?? 0));
-  return flat.slice(0, 10).map((i) => ({
-    url: cut(i.url), selector: cut(i.node?.selector), snippet: cut(i.node?.snippet, 400),
+  if (id === "network-requests") {
+    // Images are what competes with an LCP image; keep them even when a few big scripts or videos outweigh them.
+    const sorted = [...flat].sort((a, b) => Number(b.transferSize ?? 0) - Number(a.transferSize ?? 0));
+    flat = [...sorted.filter((i) => i.resourceType === "Image").slice(0, 8), ...sorted.filter((i) => i.resourceType !== "Image").slice(0, 4)];
+  }
+  return flat.slice(0, 12).map((i) => ({
+    url: cut(i.url), selector: cut(i.node?.selector), snippet: cut(i.node?.snippet, 1500),
     totalBytes: numOrU(i.totalBytes ?? i.transferSize), resourceType: cut(i.resourceType, 30), priority: cut(i.priority, 20), displayWidth: numOrU(i.node?.boundingRect?.width), displayHeight: numOrU(i.node?.boundingRect?.height), wastedBytes: numOrU(i.wastedBytes), wastedMs: numOrU(i.wastedMs ?? i.responseTime),
     durationMs: numOrU(i.duration), scriptingMs: numOrU(i.scripting)
   } as EvidenceItem)).map((e) => Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) as EvidenceItem)
@@ -54,12 +59,96 @@ function lcpPhases(details: unknown): Array<{ phase: string; ms: number }> | und
 export function competingImages(run: LighthouseRun): string[] {
   const phases = run.lcpPhases ?? [], total = phases.reduce((a, p) => a + p.ms, 0);
   const delay = phases.find((p) => p.phase === "Load Delay")?.ms ?? 0;
-  if (!total || delay / total < 0.5) return [];
-  const lcp = run.evidence["largest-contentful-paint-element"]?.[0], src = /\ssrc=["']([^"']+)["']/.exec(lcp?.snippet ?? "")?.[1];
-  const lcpPath = (() => { try { return src ? new URL(src, "https://x.invalid").pathname : ""; } catch { return ""; } })();
-  const heavy = (run.evidence["network-requests"] ?? []).filter((r) => r.url && r.resourceType === "Image" && (r.totalBytes ?? 0) > 100 * 1024 && (() => { try { return new URL(r.url!).pathname !== lcpPath; } catch { return false; } })());
+  // Lighthouse 12 reports the SIMULATED breakdown (Load Delay dominates when images compete for bandwidth). Lighthouse 13 reports the
+  // OBSERVED, unthrottled breakdown, where the same situation shows up as a simulated LCP far above the observed total.
+  const lcp = run.metrics.lcpMs ?? 0;
+  const delayDominates = delay / total >= 0.5, throttleGap = lcp > 2500 && lcp > 2 * total;
+  if (!total || !(delayDominates || throttleGap)) return [];
+  // Never block the LCP resource itself: that would make the "what-if" meaningless. We can only tell which request it is when the
+  // LCP element is an <img> (its src and every srcset candidate are excluded). For a CSS background or text, do not run the experiment.
+  const snippet = run.evidence["largest-contentful-paint-element"]?.[0]?.snippet ?? "";
+  if (!/^\s*<img\b/i.test(snippet)) return [];
+  const pathOf = (u: string) => { try { return new URL(u, "https://x.invalid").pathname; } catch { return u; } };
+  const sizeless = (p: string) => p.replace(/-\d+x\d+(\.[a-z0-9]+)$/i, "$1");
+  const srcs = [/\ssrc=["']([^"']+)["']/i.exec(snippet)?.[1], ...parseSrcset(/\ssrcset=["']([^"']+)["']/i.exec(snippet)?.[1])].filter((u): u is string => !!u).map(pathOf);
+  const isLcp = (p: string) => srcs.some((c) => c === p || sizeless(c) === sizeless(p));
+  const heavy = (run.evidence["network-requests"] ?? []).filter((r) => r.url && r.resourceType === "Image" && (r.totalBytes ?? 0) > 100 * 1024 && !isLcp(pathOf(r.url)));
   return heavy.length >= 2 ? heavy.slice(0, 8).map((r) => r.url!) : [];
 }
+
+/** The parts of a Lighthouse result we read. Typed loosely on purpose: the audit set differs between Lighthouse 12 and 13. */
+export interface Lhr {
+  lighthouseVersion: string;
+  audits: Record<string, Audit>;
+  categories: Record<string, { score?: number | null; auditRefs?: Array<{ id: string; group?: string }> } | undefined>;
+  configSettings: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  environment?: { benchmarkIndex?: number };
+  runtimeError?: { code: string };
+  runWarnings?: unknown[];
+  finalDisplayedUrl?: string;
+}
+interface Audit {
+  id: string; title: string; score: number | null; scoreDisplayMode?: string; displayValue?: unknown; numericValue?: number;
+  details?: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  metricSavings?: Record<string, number>;
+}
+
+// Lighthouse 13 replaced several audits with "insights". Each is mapped onto the evidence key the fixes already use.
+const INSIGHT_TO_EVIDENCE: Array<[insight: string, key: string]> = [["image-delivery-insight", "modern-image-formats"], ["render-blocking-insight", "render-blocking-resources"], ["font-display-insight", "font-display"]];
+const PHASE_NAMES: Record<string, string> = { timeToFirstByte: "TTFB", resourceLoadDelay: "Load Delay", resourceLoadDuration: "Load Time", elementRenderDelay: "Render Delay" };
+
+/** One Lighthouse run -> the data the report and the fixes use. Pure (no browser), so it is tested against saved real results. */
+export function runFromLhr(lhr: Lhr): LighthouseRun {
+  const A = lhr.audits, refs = lhr.categories.performance?.auditRefs ?? [];
+  const num = (id: string) => r1(A[id]?.numericValue);
+  const savingsOf = (a: Audit) => {
+    const o = a.details?.overallSavingsMs;
+    if (typeof o === "number" && o > 0) return o;
+    const m = a.metricSavings;
+    return m ? Math.max(m.LCP ?? 0, m.FCP ?? 0, m.TBT ?? 0) : 0;      // Lighthouse 13 reports estimated savings per metric
+  };
+  const failing = (a: Audit | undefined): a is Audit => !!a && a.score !== null && a.score < 0.9 && a.scoreDisplayMode !== "notApplicable";
+  const opportunities = Object.values(A).filter((a) => failing(a) && savingsOf(a) > 0)
+    .map((a) => ({ id: a.id, title: a.title, savingsMs: Math.round(savingsOf(a)) })).sort((x, y) => y.savingsMs - x.savingsMs).slice(0, 5);
+  const diagnostics = refs.filter((r) => r.group === "diagnostics" || r.group === "insights").map((r) => A[r.id]).filter(failing)
+    .map((a) => ({ id: a.id, title: a.title, displayValue: a.displayValue ? String(a.displayValue).slice(0, 80) : savingsOf(a) > 0 ? `est. savings ${Math.round(savingsOf(a))} ms` : undefined, score: a.score })).slice(0, 12);
+  const passedAudits = refs.filter((r) => r.group !== "metrics" && r.group !== "hidden" && A[r.id]?.score !== null && (A[r.id]?.score ?? 0) >= 0.9).length;
+
+  // ---- evidence (keyed by the Lighthouse 12 audit ids) ----
+  const evidence: Record<string, EvidenceItem[]> = {};
+  for (const id of EVIDENCE_AUDITS) {
+    const a = A[id]; const items = a?.details?.items as RawItem[] | undefined;
+    if (!a || !items?.length || (a.score === 1 && !ALWAYS_KEEP.has(id))) continue;
+    const ev = toEvidence(id, items); if (ev.length) evidence[id] = ev;
+  }
+  for (const [insight, key] of INSIGHT_TO_EVIDENCE) {
+    const a = A[insight], items = a?.details?.items as RawItem[] | undefined;
+    if (evidence[key]?.length || !a || !items?.length || (a.score !== null && a.score >= 1)) continue;
+    const ev = toEvidence(key, items); if (ev.length) evidence[key] = ev;
+  }
+  // LCP element, phases and discovery flags: "lcp-breakdown-insight" / "lcp-discovery-insight" in Lighthouse 13.
+  const lcpItems = [...((A["lcp-breakdown-insight"]?.details?.items ?? []) as any[]), ...((A["lcp-discovery-insight"]?.details?.items ?? []) as any[])]; // eslint-disable-line @typescript-eslint/no-explicit-any
+  if (!evidence["largest-contentful-paint-element"]) {
+    const node = lcpItems.find((i) => i?.type === "node");
+    if (node) evidence["largest-contentful-paint-element"] = [{ selector: cut(node.selector), snippet: cut(node.snippet, 1500), displayWidth: numOrU(node.boundingRect?.width), displayHeight: numOrU(node.boundingRect?.height) }];
+  }
+  const subparts = (lcpItems.find((i) => i?.type === "table" && Array.isArray(i.items) && i.items.some((x: { subpart?: string }) => x.subpart))?.items ?? []) as Array<{ subpart?: string; duration?: number }>;
+  const insightPhases = subparts.filter((x) => x.subpart && PHASE_NAMES[x.subpart] && typeof x.duration === "number").map((x) => ({ phase: PHASE_NAMES[x.subpart!]!, ms: Math.round(x.duration!) }));
+  const check = lcpItems.find((i) => i?.type === "checklist")?.items as Record<string, { value?: boolean }> | undefined;
+  const lcpDiscovery = check ? { priorityHinted: check.priorityHinted?.value, requestDiscoverable: check.requestDiscoverable?.value, eagerlyLoaded: check.eagerlyLoaded?.value } : undefined;
+  const fatal = lhr.runtimeError;
+  return {
+    ok: !fatal, ...(fatal ? { error: `Lighthouse: ${fatal.code}` } : {}),
+    scores: { performance: pct(lhr.categories.performance?.score), accessibility: pct(lhr.categories.accessibility?.score), bestPractices: pct(lhr.categories["best-practices"]?.score), seo: pct(lhr.categories.seo?.score) },
+    metrics: { fcpMs: num("first-contentful-paint"), lcpMs: num("largest-contentful-paint"), tbtMs: num("total-blocking-time"), cls: A["cumulative-layout-shift"]?.numericValue ?? null, speedIndexMs: num("speed-index"), ttiMs: num("interactive") },
+    opportunities, runWarnings: (lhr.runWarnings ?? []).map(String).slice(0, 5), diagnostics, passedAudits,
+    lcpPhases: insightPhases.length ? insightPhases : lcpPhases(A["largest-contentful-paint-element"]?.details),
+    ...(lcpDiscovery ? { lcpDiscovery } : {}), ...(typeof lhr.environment?.benchmarkIndex === "number" ? { benchmarkIndex: Math.round(lhr.environment.benchmarkIndex) } : {}),
+    evidence
+  };
+}
+
+const benchmark = (runs: LighthouseRun[]) => { const b = runs.map((r) => r.benchmarkIndex).filter((x): x is number => typeof x === "number"); return b.length ? { benchmarkIndex: Math.round(median(b)) } : {}; };
 
 export function summarizeLighthouse(runs: LighthouseRun[]): Record<string, MetricSummary> {
   const ok = runs.filter((r) => r.ok);
@@ -104,28 +193,8 @@ export async function runLighthouse(url: string, options: LighthouseOptions): Pr
         version = lhr.lighthouseVersion; throttlingMethod = lhr.configSettings.throttlingMethod; finalUrl = lhr.finalDisplayedUrl;
         const cs = lhr.configSettings;
         settings = { rttMs: cs.throttling?.rttMs, throughputKbps: cs.throttling?.throughputKbps, cpuSlowdownMultiplier: cs.throttling?.cpuSlowdownMultiplier, screenWidth: cs.screenEmulation?.width, screenHeight: cs.screenEmulation?.height, deviceScaleFactor: cs.screenEmulation?.deviceScaleFactor, userAgent: cs.emulatedUserAgent ? String(cs.emulatedUserAgent).slice(0, 200) : undefined };
-        const refs = lhr.categories.performance?.auditRefs ?? [];
-        const diagnostics = refs.filter((r) => r.group === "diagnostics").map((r) => lhr.audits[r.id]).filter((a) => a && a.score !== null && a.score < 0.9 && a.scoreDisplayMode !== "notApplicable")
-          .map((a) => ({ id: a!.id, title: a!.title, displayValue: a!.displayValue ? String(a!.displayValue).slice(0, 80) : undefined, score: a!.score })).slice(0, 12);
-        const passedAudits = refs.filter((r) => r.group !== "metrics" && lhr.audits[r.id]?.score !== null && (lhr.audits[r.id]?.score ?? 0) >= 0.9).length;
         if (options.keepReports) htmlReports.push(ReportGenerator.generateReportHtml(lhr));
-        const num = (id: string) => r1(lhr.audits[id]?.numericValue);
-        const fatal = lhr.runtimeError;
-        runs.push({
-          ok: !fatal, ...(fatal ? { error: `Lighthouse: ${fatal.code}` } : {}),
-          scores: { performance: pct(lhr.categories.performance?.score), accessibility: pct(lhr.categories.accessibility?.score), bestPractices: pct(lhr.categories["best-practices"]?.score), seo: pct(lhr.categories.seo?.score) },
-          metrics: { fcpMs: num("first-contentful-paint"), lcpMs: num("largest-contentful-paint"), tbtMs: num("total-blocking-time"), cls: lhr.audits["cumulative-layout-shift"]?.numericValue ?? null, speedIndexMs: num("speed-index"), ttiMs: num("interactive") },
-          opportunities: Object.values(lhr.audits)
-            .filter((a) => a.score !== null && a.score < 0.9) // passing audits are not opportunities
-            .map((a) => ({ id: a.id, title: a.title, savingsMs: Math.round((a.details as { overallSavingsMs?: number } | undefined)?.overallSavingsMs ?? 0) }))
-            .filter((o) => o.savingsMs > 0).sort((a, b) => b.savingsMs - a.savingsMs).slice(0, 5),
-          runWarnings: (lhr.runWarnings ?? []).map(String).slice(0, 5), diagnostics, passedAudits, lcpPhases: lcpPhases(lhr.audits["largest-contentful-paint-element"]?.details),
-          evidence: Object.fromEntries(EVIDENCE_AUDITS.flatMap((id) => {
-            const a = lhr.audits[id]; const items = (a?.details as { items?: RawItem[] } | undefined)?.items;
-            if (!a || !items?.length || (a.score === 1 && !ALWAYS_KEEP.has(id))) return [];
-            const ev = toEvidence(id, items); return ev.length ? [[id, ev]] : [];
-          }))
-        });
+        runs.push(runFromLhr(lhr as unknown as Lhr));
       } catch { runs.push({ ...EMPTY, error: "Lighthouse run failed." }); }
     }
     if (options.whatIf) {
@@ -149,7 +218,7 @@ export async function runLighthouse(url: string, options: LighthouseOptions): Pr
   return {
     schemaVersion: "1.0.0", source: "lab", engine: "lighthouse", url, finalUrl, measuredAt: new Date().toISOString(), profile,
     status: ok === runs.length ? "complete" : ok ? "partial" : "failed",
-    metadata: { lighthouseVersion: version, browser: `chromium ${browser.version?.() ?? ""}`.trim(), throttlingMethod, formFactor: profile, runs: runCount, settings },
+    metadata: { lighthouseVersion: version, browser: `chromium ${browser.version?.() ?? ""}`.trim(), throttlingMethod, formFactor: profile, runs: runCount, settings, ...benchmark(runs) },
     runs, summary: summarizeLighthouse(runs), ...(experiments.length ? { experiments } : {}), ...(options.keepReports ? { htmlReports } : {}),
     limitations: [
       "Lab data from Lighthouse with simulated throttling on this machine; it is not field Core Web Vitals (CrUX/RUM).",

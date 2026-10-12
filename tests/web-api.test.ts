@@ -27,7 +27,7 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "wpi-reports-"));
   await mkdir(join(dir, FOLDER), { recursive: true });
-  const input = { audits: [audit], comparisons: [], measurements: [], lighthouse: [{ measurement: lh, reportFiles: [] }], failures: [] };
+  const input = { audits: [audit], comparisons: [], measurements: [], lighthouse: [{ measurement: lh, reportFiles: [] }], failures: [], stepCount: 1 };
   await writeFile(join(dir, FOLDER, "report.html"), renderHtmlReport(input));
   await writeFile(join(dir, FOLDER, "data.json"), JSON.stringify({ ...input, generatedAt: "now" }));
   await writeFile(join(dir, FOLDER, "lighthouse-1-run1.html"), "<html>lh</html>");
@@ -89,7 +89,7 @@ describe("exports", () => {
 describe("POST /api/jobs", () => {
   const fake: typeof generateReport = async (req, _cfg, hooks) => {
     hooks?.onPlan?.(["audit https://a.test/"]); hooks?.onStep?.(0, "running"); hooks?.onStep?.(0, "done");
-    return { dir: join(dir, FOLDER), file: join(dir, FOLDER, "report.html"), folder: FOLDER, failures: [] };
+    return { dir: join(dir, FOLDER), file: join(dir, FOLDER, "report.html"), folder: FOLDER, failures: [], stepCount: 1 };
   };
   it("validates input", async () => {
     const app = make({}, fake);
@@ -107,9 +107,44 @@ describe("POST /api/jobs", () => {
     expect((await get(app, "/api/jobs/does-not-exist")).statusCode).toBe(404);
     expect((await get(app, "/api/jobs")).json().jobs).toHaveLength(1);
   });
+  it("accepts one or both device profiles (and the older single `profile`), and rejects bad ones", async () => {
+    const seen: unknown[] = [];
+    const rec: typeof generateReport = async (req) => { seen.push(req); return { dir: join(dir, FOLDER), file: join(dir, FOLDER, "report.html"), folder: FOLDER, failures: [], stepCount: 1 }; };
+    const app = make({}, rec);
+    const post = (payload: object) => app.inject({ method: "POST", url: "/api/jobs", payload, headers: H });
+    expect((await post({ lighthouse: ["https://a.test/"], profiles: ["desktop", "mobile"] })).statusCode).toBe(202);
+    expect((await post({ lighthouse: ["https://a.test/"], profile: "mobile" })).statusCode).toBe(202);
+    expect((await post({ lighthouse: ["https://a.test/"] })).statusCode).toBe(202);
+    for (const bad of [{ profiles: [] }, { profiles: ["tablet"] }, { profiles: ["mobile", "desktop", "mobile"] }, { profile: "tablet" }])
+      expect((await post({ lighthouse: ["https://a.test/"], ...bad })).statusCode, JSON.stringify(bad)).toBe(400);
+    await new Promise((r) => setTimeout(r, 50));
+    expect((seen as Array<{ profiles: string[] }>).map((r) => r.profiles)).toEqual([["mobile", "desktop"], ["mobile"], ["desktop"]]);   // normalised: mobile first; default desktop
+  });
   it("rejects a foreign Origin but accepts the dashboard's own origin", async () => {
     const app = make({}, fake);
     expect((await app.inject({ method: "POST", url: "/api/jobs", payload: { audits: ["https://a.test/"] }, headers: { ...H, origin: "https://evil.example" } })).statusCode).toBe(403);
     expect((await app.inject({ method: "POST", url: "/api/jobs", payload: { audits: ["https://a.test/"] }, headers: { ...H, origin: "http://127.0.0.1:4178" } })).statusCode).toBe(202);
+  });
+});
+
+describe("auth is checked on the decoded path (deny by default)", () => {
+  const TOKEN = "t".repeat(20);
+  const app = () => make({ WPI_API_TOKEN: TOKEN });
+  it("percent-encoded and odd paths cannot bypass the token", async () => {
+    const a = app();
+    for (const url of ["/api/jobs", "/%61pi/jobs", "/%61%70%69/jobs", "/api/history", "/%61pi/history", "/api/reports"])
+      expect((await a.inject({ method: "GET", url, headers: H })).statusCode, url).toBe(401);
+    expect((await a.inject({ method: "POST", url: "/%61pi/audit", payload: { url: "https://site.com/" }, headers: H })).statusCode).toBe(401);
+    expect([400, 401]).toContain((await a.inject({ method: "GET", url: "/%zz", headers: H })).statusCode);            // undecodable: rejected, never served
+    for (const url of ["/health"]) expect((await a.inject({ method: "GET", url, headers: H })).statusCode, url).toBe(200);
+    expect((await a.inject({ method: "GET", url: "/api/jobs", headers: { ...H, authorization: `Bearer ${TOKEN}` } })).statusCode).toBe(200);
+  });
+  it("sends clickjacking and sniffing protections on every response", async () => {
+    const r = await make().inject({ method: "GET", url: "/health", headers: H });
+    expect(r.headers).toMatchObject({ "x-frame-options": "DENY", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "content-security-policy": "frame-ancestors 'none'" });
+  });
+  it("rejects job URLs that carry credentials", async () => {
+    const r = await make().inject({ method: "POST", url: "/api/jobs", payload: { audits: ["https://user:pw@a.test/"] }, headers: H });
+    expect(r.statusCode).toBe(400);
   });
 });

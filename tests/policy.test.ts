@@ -32,7 +32,7 @@ describe("validateDestination", () => {
   const check = (url: string, policy = pub) => code(validateDestination(new URL(url), policy, resolve));
 
   it("accepts a public destination and returns the address to pin", async () => {
-    expect(await validateDestination(new URL("https://example.com/"), pub, resolve)).toEqual({ address: "93.184.216.34", family: 4 });
+    expect(await validateDestination(new URL("https://example.com/"), pub, resolve)).toEqual({ address: "93.184.216.34", family: 4, all: [{ address: "93.184.216.34", family: 4 }] });
   });
   it("rejects bad schemes and credentials", async () => {
     expect(await check("ftp://example.com/")).toBe("INVALID_URL");

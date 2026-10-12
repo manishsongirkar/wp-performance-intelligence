@@ -7,4 +7,4 @@ try { config = loadConfig(); } catch (error) { console.error(error instanceof Er
 const app = buildApp(config);
 app.log.info({ mode: config.fetch.policy.mode, host: config.host }, "Starting");
 if (config.fetch.policy.mode === "local") console.log(`Dashboard: http://${config.host}:${config.port}/  (run "npm run build" first if it shows "not built")`);
-app.listen({ host: config.host, port: config.port }).catch((error) => { app.log.error(error); process.exit(1); });
+app.listen({ host: config.host.replace(/^\[|\]$/g, ""), port: config.port }).catch((error) => { app.log.error(error); process.exit(1); });

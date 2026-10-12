@@ -1,3 +1,6 @@
+import { php, safeUrl, pathOf } from "./escape.js";
+import { isNoindex } from "../../contracts/src/robots.js";
+
 export interface Fix { title: string; language: "php" | "html" | "bash" | "apache" | "nginx" | "json" | "sql"; code: string; note?: string }
 
 const CANONICAL: Fix[] = [{
@@ -47,7 +50,7 @@ const H1: Fix[] = [{
 
 const ALT: Fix[] = [
   { title: "Meaningful image: add descriptive alt text", language: "html", code: '<img src="/wp-content/uploads/hero.jpg" alt="Engineer installing a vibrating wire piezometer" width="1200" height="600">' },
-  { title: "Decorative image: use an empty alt on purpose", language: "html", code: '<img src="/decor.svg" alt="" width="40" height="40">', note: "An empty alt is valid for decorative images; this tool currently counts it as missing, so review before changing." },
+  { title: "Decorative image: use an empty alt on purpose", language: "html", code: '<img src="/decor.svg" alt="" width="40" height="40">', note: "An empty alt is valid for decorative images, and this tool does not count it as missing." },
   { title: "List media-library images without alt text", language: "bash", code: `wp db query "SELECT p.ID, p.guid FROM $(wp db prefix)posts p LEFT JOIN $(wp db prefix)postmeta m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_image_alt' WHERE p.post_type = 'attachment' AND p.post_mime_type LIKE 'image/%' AND (m.meta_value IS NULL OR m.meta_value = '')"` },
   { title: "Set alt when rendering attachments in PHP", language: "php", code: "echo wp_get_attachment_image( $attachment_id, 'large', false, array( 'alt' => 'Describe the image' ) );" }
 ];
@@ -67,19 +70,13 @@ const JSONLD: Fix[] = [{
   note: "Check for duplicates first: SEO plugins already output an Organization/WebSite graph."
 }];
 
-const REDIRECT: Fix[] = [
-  { title: "Single 301 to the final URL (Apache .htaccess)", language: "apache", code: "Redirect 301 /old-page/ https://www.example.com/new-page/" },
-  { title: "Single 301 to the final URL (nginx)", language: "nginx", code: "location = /old-page/ { return 301 https://www.example.com/new-page/; }" },
-  { title: "Redirect in WordPress code", language: "php", code: "add_action( 'template_redirect', function () {\n\tif ( is_404() && '/old-page/' === wp_parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ) ) {\n\t\twp_safe_redirect( home_url( '/new-page/' ), 301 );\n\t\texit;\n\t}\n} );" }
-];
-
 const WEBP: Fix[] = [
   { title: "Generate WebP for new uploads (WordPress 6.5+)", language: "php", code: `add_filter( 'image_editor_output_format', function ( $formats ) {
 	$formats['image/jpeg'] = 'image/webp';
 	$formats['image/png']  = 'image/webp';
 	return $formats;
 } );`, note: "Then regenerate existing sizes (below). Keep the originals; test on staging first." },
-  { title: "Regenerate thumbnails", language: "bash", code: "wp media regenerate --yes" }
+  { title: "Regenerate thumbnails (rebuilds EVERY image size on the site: run it off-peak, or use the exact-attachment command under Images)", language: "bash", code: "wp media regenerate --yes" }
 ];
 
 const OPTIMIZE: Fix[] = [{
@@ -116,22 +113,22 @@ const SERVER: Fix[] = [
 const RENDER_BLOCKING: Fix[] = [{
   title: "Load non-critical scripts with defer (WordPress 6.3+)",
   language: "php",
-  code: "wp_enqueue_script( 'my-script', get_theme_file_uri( 'app.js' ), array(), '1.0', array( 'strategy' => 'defer', 'in_footer' => true ) );"
+  code: "wp_enqueue_script( 'YOUR-HANDLE', get_theme_file_uri( 'YOUR-SCRIPT.js' ), array(), '1.0', array( 'strategy' => 'defer', 'in_footer' => true ) );"
 }];
 
 const COMPRESSION: Fix[] = [
-  { title: "Enable gzip/brotli (nginx)", language: "nginx", code: "gzip on;\ngzip_types text/css application/javascript application/json image/svg+xml;" },
-  { title: "Enable compression (Apache)", language: "apache", code: "<IfModule mod_deflate.c>\n  AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json image/svg+xml\n</IfModule>" }
+  { title: "Enable gzip/brotli (nginx)", language: "nginx", code: "gzip on;\ngzip_types text/css application/javascript text/javascript application/json image/svg+xml;" },
+  { title: "Enable compression (Apache)", language: "apache", code: "<IfModule mod_deflate.c>\n  AddOutputFilterByType DEFLATE text/html text/css application/javascript text/javascript application/json image/svg+xml\n</IfModule>" }
 ];
 
-const CACHE: Fix[] = [{ title: "Long cache lifetime for static assets (Apache)", language: "apache", code: '<IfModule mod_expires.c>\n  ExpiresActive On\n  ExpiresByType image/webp "access plus 1 year"\n  ExpiresByType text/css "access plus 1 year"\n  ExpiresByType application/javascript "access plus 1 year"\n</IfModule>' }];
+const CACHE: Fix[] = [{ title: "Long cache lifetime for static assets (Apache)", language: "apache", code: '<IfModule mod_expires.c>\n  ExpiresActive On\n  ExpiresByType image/webp "access plus 1 year"\n  ExpiresByType text/css "access plus 1 year"\n  ExpiresByType application/javascript "access plus 1 year"\n  ExpiresByType text/javascript "access plus 1 year"\n</IfModule>' }];
 
 const LAZY: Fix[] = [{ title: "Lazy-load below-the-fold images", language: "html", code: '<img src="photo.webp" alt="..." width="800" height="600" loading="lazy" decoding="async">' }];
 
 const BY_RULE: Record<string, Fix[]> = {
   "seo.canonical.missing": CANONICAL, "seo.robots.noindex": NOINDEX, "seo.description.missing": DESCRIPTION,
   "seo.title.missing": TITLE, "seo.h1.missing": H1, "seo.h1.multiple": H1, "a11y.images.missing-alt": ALT,
-  "schema.jsonld.invalid-json": JSONLD, "http.redirect": REDIRECT, "http.error-status": REDIRECT,
+  "schema.jsonld.invalid-json": JSONLD,
   // Lighthouse audit ids
   "modern-image-formats": WEBP, "uses-webp-images": WEBP, "uses-responsive-images": RESPONSIVE, "uses-optimized-images": OPTIMIZE, "offscreen-images": LAZY,
   "server-response-time": SERVER, "render-blocking-resources": RENDER_BLOCKING, "uses-text-compression": COMPRESSION,
@@ -144,6 +141,93 @@ const BY_DIFF_TITLE: Record<string, string> = {
   "Structured data types changed": "schema.jsonld.invalid-json", "JSON-LD block count decreased": "schema.jsonld.invalid-json", "HTTP status changed": "http.redirect"
 };
 
+/** Rule ids that have catalogue fixes (used by tests to check every one). */
+export const catalogRuleIds = (): string[] => [...Object.keys(BY_RULE), "http.redirect", "http.error-status"];
+
+export interface FixContext { pageUrl?: string; redirectTo?: string }
+
+const esc_re = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Redirect rules for one URL. With a known source and target they are exact; otherwise the unknown part is an obvious CAPITALISED
+ * placeholder, never a plausible-looking fake value. Rules that could loop are never produced: if the path and query are unchanged
+ * (http -> https, www -> non-www) the redirect has to happen at the domain level, and an identical source and target needs no rule.
+ */
+export function redirectFixes(from?: string, to?: string, only404 = false): Fix[] {
+  const parse = (u?: string) => { try { return u && safeUrl(u) ? new URL(u) : undefined; } catch { return undefined; } };
+  const f = parse(from), t = parse(to);
+  if (f && t && f.origin === t.origin && f.pathname === t.pathname && f.search === t.search) return [];
+  const targetUrl = t ? `${t.origin}${t.pathname}${t.search}` : "https://YOUR-SITE/NEW-PATH/";
+
+  // Same path and query on another scheme/host: a path rule would send the new URL to itself forever.
+  if (f && t && f.pathname === t.pathname && f.search === t.search) {
+    const note = "The path does not change, so a path-based rule would redirect the new URL to itself in an endless loop. This redirects at the domain level instead.";
+    if (f.hostname === t.hostname && f.protocol === "http:" && t.protocol === "https:") return [
+      { title: "Redirect HTTP to HTTPS (Apache .htaccess)", language: "apache", code: `RewriteEngine On\nRewriteCond %{HTTPS} off\nRewriteRule ^ https://${t.host}%{REQUEST_URI} [L,R=301]`, note },
+      { title: "Redirect HTTP to HTTPS (nginx)", language: "nginx", code: `server {\n    listen 80;\n    server_name ${f.hostname};\n    return 301 "https://${t.host}$request_uri";\n}`, note }
+    ];
+    return [
+      { title: `Redirect ${f.host} to ${t.host} (Apache .htaccess)`, language: "apache", code: `RewriteEngine On\nRewriteCond %{HTTP_HOST} ^${esc_re(f.host)}$ [NC]\nRewriteRule ^ ${t.protocol}//${t.host}%{REQUEST_URI} [L,R=301]`, note },
+      { title: `Redirect ${f.host} to ${t.host} (nginx)`, language: "nginx", code: `server {\n    server_name ${f.hostname};\n    return 301 "${t.protocol}//${t.host}$request_uri";\n}`, note }
+    ];
+  }
+
+  const path = f && /^\/[A-Za-z0-9._~/%-]*$/.test(f.pathname) ? f.pathname : "/OLD-PATH/";
+  const query = f ? f.search.replace(/^\?/, "") : "";
+  const exact = !!f && !!t && path !== "/OLD-PATH/";
+  const sameHost = !!f && !!t && f.hostname === t.hostname;
+  const note = exact ? "Exact rule for this URL. Use only one of these (server config or WordPress code), not both." : "Replace the CAPITALISED parts: OLD-PATH is the path of the URL being redirected, NEW-PATH the page that replaces it.";
+  const q = esc_re(query);
+  return [
+    { title: "301 redirect to the final URL (Apache .htaccess)", language: "apache",
+      code: query ? `RewriteEngine On\nRewriteCond %{QUERY_STRING} ^${q}$\nRewriteRule ^${esc_re(path.replace(/^\//, ""))}$ ${targetUrl} [L,R=301]` : `RedirectMatch 301 ^${esc_re(path)}$ ${targetUrl}`, note },
+    { title: "301 redirect to the final URL (nginx)", language: "nginx",
+      code: query ? `location = ${path} {\n    if ($args = "${query}") {\n        return 301 "${targetUrl}";\n    }\n}` : `location = ${path} { return 301 "${targetUrl}"; }`, note },
+    {
+      title: "301 redirect in WordPress code", language: "php",
+      code: `add_action( 'template_redirect', function () {
+	$uri  = isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( $_SERVER['REQUEST_URI'] ) : '';
+	$path = wp_parse_url( $uri, PHP_URL_PATH );${query ? "\n\t$query = (string) wp_parse_url( $uri, PHP_URL_QUERY );" : ""}
+	if ( ${only404 ? "is_404() && " : ""}${php(path)} === $path${query ? ` && ${php(query)} === $query` : ""} ) {
+		${sameHost || !exact ? "wp_safe_redirect" : "wp_redirect"}( ${php(targetUrl)}, 301 );
+		exit;
+	}
+} );`,
+      note: note + (sameHost || !exact ? "" : " The target is on another host, so wp_redirect() is used (wp_safe_redirect() refuses other hosts).")
+    }
+  ];
+}
+
+const withUrl = (list: Fix[], pageUrl?: string): Fix[] => {
+  const url = pageUrl && safeUrl(pageUrl) ? pageUrl : "https://YOUR-SITE/";
+  return list.map((f) => ({ ...f, code: f.code.replaceAll("https://example.com/", url) }));
+};
+
 /** Generic, copy-and-adapt examples. They are suggestions, not verified fixes for the audited site. */
-export const fixesForRule = (ruleId: string): Fix[] => BY_RULE[ruleId] ?? [];
-export const fixesForDifference = (title: string): Fix[] => fixesForRule(BY_DIFF_TITLE[title] ?? "");
+export function fixesForRule(ruleId: string, ctx: FixContext = {}): Fix[] {
+  if (ruleId === "http.redirect") return redirectFixes(ctx.pageUrl, ctx.redirectTo);
+  if (ruleId === "http.error-status") return redirectFixes(ctx.pageUrl, undefined, true);
+  return withUrl(BY_RULE[ruleId] ?? [], ctx.pageUrl);
+}
+/**
+ * Advice for one old-vs-new difference. It depends on the DIRECTION of the change: a robots change that removed noindex, or a
+ * description that was added, needs no fix. With no values to judge (older data), no advice is offered rather than a guess.
+ */
+export function fixesForDifference(title: string, ctx: { oldUrl?: string; newUrl?: string; oldValue?: unknown; newValue?: unknown } = {}): Fix[] {
+  const nv = ctx.newValue, ov = ctx.oldValue;
+  if (nv === undefined && ov === undefined) return [];   // nothing to judge the direction by
+  const empty = (v: unknown) => v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
+  const forNew = (rule: string) => fixesForRule(rule, { pageUrl: ctx.newUrl });
+  switch (title) {
+    case "Robots directive changed": return isNoindex(typeof nv === "string" ? nv : null) && !isNoindex(typeof ov === "string" ? ov : null) ? forNew("seo.robots.noindex") : [];
+    case "Canonical URL changed": return empty(nv) ? forNew("seo.canonical.missing") : [];
+    case "Meta description changed": return empty(nv) ? forNew("seo.description.missing") : [];
+    case "Page title changed": return empty(nv) ? forNew("seo.title.missing") : [];
+    case "H1 content changed": return Array.isArray(nv) && nv.length === 0 ? forNew("seo.h1.missing") : Array.isArray(nv) && nv.length > 1 ? forNew("seo.h1.multiple") : [];
+    case "More images lack alt text": return forNew("a11y.images.missing-alt");
+    case "Structured data types changed": return Array.isArray(ov) && Array.isArray(nv) && ov.some((t) => !nv.includes(t)) ? forNew("schema.jsonld.invalid-json") : [];
+    case "JSON-LD block count decreased": return forNew("schema.jsonld.invalid-json");
+    case "HTTP status changed": return typeof nv === "number" && nv >= 400 ? redirectFixes(ctx.newUrl, undefined, true) : [];
+    default: return [];   // e.g. "Internal link count decreased": a content review, not code
+  }
+}

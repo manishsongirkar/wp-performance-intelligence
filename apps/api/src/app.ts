@@ -13,23 +13,26 @@ import { runLighthouse } from "../../../packages/browser-audit/src/lighthouse.js
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 import { createJobManager } from "./jobs.js";
-import { generateReport, REPORT_FOLDER } from "./report.js";
+import { readHistory } from "./history.js";
+import { generateReport, normalizeProfiles, REPORT_FOLDER } from "./report.js";
 import { isLoopbackHost, type Config } from "./config.js";
 
 const auditSchema = z.object({ url: z.string().url().max(2048) });
 const compareSchema = z.object({ oldUrl: z.string().url().max(2048), newUrl: z.string().url().max(2048) });
 const measureSchema = z.object({ url: z.string().url().max(2048), profile: z.enum(["desktop", "mobile"]).default("desktop"), runs: z.number().int().min(1).max(5).default(3) });
-const urlList = z.array(z.string().url().max(2048).refine((u) => /^https?:\/\//i.test(u), "Only http(s) URLs")).max(20).default([]);
+const httpUrl = (max = 2048) => z.string().url().max(max).refine((u) => /^https?:\/\//i.test(u), "Only http(s) URLs").refine((u) => { try { const x = new URL(u); return !x.username && !x.password; } catch { return false; } }, "URLs with credentials are not allowed");
+const urlList = z.array(httpUrl()).max(20).default([]);
 const jobSchema = z.object({
   audits: urlList, measures: urlList, lighthouse: urlList,
-  compares: z.array(z.object({ oldUrl: z.string().url().max(2048), newUrl: z.string().url().max(2048) }).refine((p) => /^https?:\/\//i.test(p.oldUrl) && /^https?:\/\//i.test(p.newUrl), "Only http(s) URLs")).max(10).default([]),
+  compares: z.array(z.object({ oldUrl: httpUrl(), newUrl: httpUrl() })).max(10).default([]),
   runs: z.number().int().min(1).max(5).default(3),
-  profile: z.enum(["desktop", "mobile"]).default("desktop"),
-  baseline: z.string().regex(REPORT_FOLDER).optional(),
-  psi: z.boolean().default(false)
+  /** Device profiles to test. `profile` (single) is still accepted for older callers. Default: desktop. */
+  profiles: z.array(z.enum(["desktop", "mobile"])).min(1).max(2).optional(),
+  profile: z.enum(["desktop", "mobile"]).optional(),
+  baseline: z.string().regex(REPORT_FOLDER).optional()
 }).refine((j) => j.audits.length + j.compares.length + j.measures.length + j.lighthouse.length > 0, "Add at least one URL.");
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml" };
-const REPORT_FILE = /^(report\.html|data\.json|lighthouse-\d+-run\d+\.html)$/;
+const REPORT_FILE = /^(report\.html|data\.json|lighthouse-\d+(-(mobile|desktop))?-run\d+\.html)$/;
 const csvSchema = z.object({ csv: z.string().min(1).max(500_000) });
 
 const STATUS: Record<SafeFetchErrorCode, number> = {
@@ -63,10 +66,18 @@ export function buildApp(config: Config, deps: { resolve?: Resolver; transport?:
         return reply.header("access-control-allow-methods", "GET,POST").header("access-control-allow-headers", "content-type,authorization").code(204).send();
       }
     }
-    if (config.token && request.url.startsWith("/api/")) {
+    // Deny by default: only these paths are reachable without the token. Decode first: Fastify routes on the decoded path, so "/%61pi/..." must not slip past a raw prefix check.
+    let path = "";
+    try { path = decodeURIComponent(request.url.split("?")[0] ?? ""); } catch { path = "\0bad"; }
+    const open = path === "/health" || path === "/" || path.startsWith("/assets/") || path.startsWith("/reports/");
+    if (config.token && !open) {
       const auth = request.headers.authorization ?? "";
       if (!auth.startsWith("Bearer ") || !safeEqual(auth.slice(7), config.token)) return reply.code(401).send({ error: "Unauthorized" });
     }
+  });
+
+  app.addHook("onSend", async (_request, reply) => {
+    reply.header("x-content-type-options", "nosniff").header("x-frame-options", "DENY").header("referrer-policy", "no-referrer").header("content-security-policy", "frame-ancestors 'none'");
   });
 
   app.setErrorHandler((error: Error & { statusCode?: number }, request, reply) => {
@@ -134,7 +145,7 @@ export function buildApp(config: Config, deps: { resolve?: Resolver; transport?:
     const first = j.audits[0] ?? j.compares[0]?.newUrl ?? j.measures[0] ?? j.lighthouse[0]!;
     const job = jobs.submit({
       audits: j.audits, measures: j.measures, lighthouse: j.lighthouse, compares: j.compares.map((p) => [p.oldUrl, p.newUrl] as [string, string]),
-      runs: j.runs, profile: j.profile, outDir: config.reportsDir, psi: j.psi && j.lighthouse.length > 0, psiApiKey: config.psiApiKey, baselinePath: j.baseline ? join(config.reportsDir, j.baseline) : undefined
+      runs: j.runs, profiles: normalizeProfiles(j.profiles ?? (j.profile ? [j.profile] : ["desktop"])), outDir: config.reportsDir, baselinePath: j.baseline ? join(config.reportsDir, j.baseline) : undefined
     }, new URL(first).hostname);
     if (!job) return reply.code(429).send({ error: "Too many queued reports; wait for one to finish.", code: "BUSY" });
     return reply.code(202).send({ job });
@@ -160,6 +171,8 @@ export function buildApp(config: Config, deps: { resolve?: Resolver; transport?:
     } catch { /* reports dir missing: no reports yet */ }
     return { reports: found.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50) };
   });
+  // Everything the dashboard needs to draw progress graphs and list earlier reports (one entry per saved report, data points per tested URL).
+  app.get("/api/history", async (_req, reply) => (isLocal ? readHistory(config.reportsDir) : localOnly(reply)));
   // Serves only report files from folders that match the generated naming pattern: no traversal, fixed file whitelist.
   app.get<{ Params: { folder: string; file: string } }>("/reports/:folder/:file", async (request, reply) => {
     if (!isLocal) return localOnly(reply);
