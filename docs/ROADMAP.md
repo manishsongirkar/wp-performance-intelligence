@@ -24,10 +24,12 @@
 - [ ] LCP element, resource timing and browser trace artifacts
 - [x] HTML report (`pnpm wpi report`) with Lighthouse standalone reports and copyable fix examples
 - [x] Evidence-based exact fixes (LCP/FCP/TBT/unused CSS+JS/images/CLS) and `--baseline` before/after deltas
+- [x] PageSpeed Insights alignment (same lab conditions, Opportunities/Diagnostics, opt-in PSI API with field data), LCP phase breakdown and what-if experiment, applied-fix detection
 - [x] Median/min/max summary with run metadata (browser, viewport, UA, throttling)
 
 ## Milestone 3 — Bulk jobs and migration intelligence
-- [ ] CSV upload UI and batch job queue
+- [x] Web UI to run reports in the background (single-job queue), CSV import, JSON/xlsx/HTML export
+- [ ] Batch job queue for large URL sets (per-host limits, retries, pause/resume)
 - [ ] Per-row status, retries and downloadable failures
 - [ ] Redirect validation and URL inventory/coverage
 - [ ] Configuration parity imports and intentional-change decisions

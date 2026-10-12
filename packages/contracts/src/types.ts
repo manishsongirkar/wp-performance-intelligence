@@ -28,6 +28,8 @@ export interface PageAudit {
   statusCode: number;
   finalUrl: string;
   redirectChain: string[];
+  /** <link rel="preload"> tags found in the HTML (used to tell which fixes are already applied). */
+  preloads?: Array<{ href: string; as: string | null; fetchPriority: string | null }>;
   contentType: string | null;
   title: string | null;
   metaDescription: string | null;
@@ -114,6 +116,7 @@ export interface BrowserMeasurement {
 export interface EvidenceItem {
   url?: string; selector?: string; snippet?: string;
   totalBytes?: number; wastedBytes?: number; wastedMs?: number; durationMs?: number; scriptingMs?: number;
+  resourceType?: string; priority?: string; displayWidth?: number; displayHeight?: number;
 }
 
 export interface LighthouseRun {
@@ -123,8 +126,24 @@ export interface LighthouseRun {
   metrics: { fcpMs: number | null; lcpMs: number | null; tbtMs: number | null; cls: number | null; speedIndexMs: number | null; ttiMs: number | null };
   opportunities: Array<{ id: string; title: string; savingsMs: number }>;
   runWarnings: string[];
+  /** PageSpeed-Insights-style "Diagnostics": failing audits that are not opportunities. */
+  /** LCP broken into TTFB / Load Delay / Load Time / Render Delay (ms), as in Lighthouse and PageSpeed Insights. */
+  lcpPhases?: Array<{ phase: string; ms: number }>;
+  diagnostics?: Array<{ id: string; title: string; displayValue?: string; score: number | null }>;
+  passedAudits?: number;
   /** Keyed by Lighthouse audit id, e.g. "unused-css-rules". Only audits that failed or list items. */
   evidence: Record<string, EvidenceItem[]>;
+}
+
+/** A what-if Lighthouse run with some requests blocked, to turn an inferred cause into a measured one. Not a fix. */
+export interface LighthouseExperiment {
+  id: "block-competing-images";
+  description: string;
+  blocked: string[];
+  lcpMs: number | null;
+  performanceScore: number | null;
+  baselineLcpMs: number | null;
+  baselinePerformance: number | null;
 }
 
 /** Lighthouse lab result (simulated throttling by default). Not field data. */
@@ -137,10 +156,28 @@ export interface LighthouseMeasurement {
   measuredAt: string;
   profile: BrowserProfileName;
   status: "complete" | "partial" | "failed";
-  metadata: { lighthouseVersion: string; browser: string; throttlingMethod: string; formFactor: string; runs: number };
+  metadata: {
+    lighthouseVersion: string; browser: string; throttlingMethod: string; formFactor: string; runs: number;
+    /** Effective Lighthouse settings, to compare with PageSpeed Insights' lab conditions. */
+    settings?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number; screenWidth?: number; screenHeight?: number; deviceScaleFactor?: number; userAgent?: string };
+  };
   runs: LighthouseRun[];
   summary: Record<string, MetricSummary>;
   limitations: string[];
+  experiments?: LighthouseExperiment[];
   /** Full Lighthouse HTML report per run; only present when requested (large). */
   htmlReports?: string[];
+}
+
+export interface PsiFieldMetric { p75: number; category: string }
+/** Result of Google's PageSpeed Insights API (lab = Lighthouse on Google's servers, field = CrUX real-user data). */
+export interface PsiResult {
+  strategy: BrowserProfileName;
+  fetchedAt: string;
+  lighthouseVersion: string;
+  finalUrl: string;
+  scores: { performance: number | null; accessibility: number | null; bestPractices: number | null; seo: number | null };
+  metrics: { fcpMs: number | null; lcpMs: number | null; tbtMs: number | null; cls: number | null; speedIndexMs: number | null };
+  field: null | { scope: "url" | "origin"; overall: string | null; metrics: { lcpMs?: PsiFieldMetric; inpMs?: PsiFieldMetric; cls?: PsiFieldMetric; fcpMs?: PsiFieldMetric; ttfbMs?: PsiFieldMetric } };
+  opportunities: Array<{ id: string; title: string; savingsMs: number }>;
 }

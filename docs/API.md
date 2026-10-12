@@ -20,6 +20,19 @@ Types: `packages/contracts/src/types.ts`; export input is validated by `packages
 
 `/api/lighthouse` runs Lighthouse (simulated throttling) on Playwright's Chromium and returns, per run, category scores (performance, accessibility, best practices, SEO), FCP, LCP, TBT, CLS, Speed Index, TTI and the top opportunities by estimated savings, plus median/min/max over runs and the Lighthouse version. Lab data only; same local-mode restriction and the same single-browser-job limit as `/api/measure`.
 
+## Report jobs (local mode only; 403 `LOCAL_ONLY` otherwise)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/jobs` `{ audits, measures, lighthouse: string[], compares: [{oldUrl,newUrl}], runs: 1-5, profile, baseline?: "<report folder>", psi?: boolean }` | Queue a background report. `psi: true` also queries Google PageSpeed Insights for each Lighthouse URL (public URLs only). 202 `{ job }`; 400 on invalid input; 429 when the queue is full. At least one URL is required (max 20 per list, 10 comparisons). |
+| `GET /api/jobs`, `GET /api/jobs/:id` | Job status: `queued/running/done/failed/cancelled`, per-step state, `folder`, `filePath`, `failures`. |
+| `POST /api/jobs/:id/cancel` | Cancel a queued job now, or a running one before its next step. |
+| `GET /api/reports` | Earlier report folders in `WPI_REPORTS_DIR` (newest first, max 50). |
+| `GET /reports/:folder/:file` | `report.html`, `data.json` or `lighthouse-N-runM.html` only. Folder names must match `<site>_<YYYY-MM-DD_HH-mm-ss>`; anything else is 404. |
+| `GET /reports/:folder/export/{json,xlsx,html}` | Download as an attachment. |
+
+The dashboard (`GET /`) is served by the same origin, so no CORS is involved.
+
 ## Errors
 
 `{ "error": string, "code"?: string }`. Stack traces and internal details are never returned.
