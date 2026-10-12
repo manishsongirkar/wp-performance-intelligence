@@ -21,6 +21,7 @@ export const pageAuditSchema = z.object({
   schemaVersion: z.literal("1.0.0"),
   url: str, fetchedAt: str, statusCode: z.number().int(), finalUrl: str,
   redirectChain: z.array(str).max(20).default([]),
+  preloads: z.array(z.object({ href: str, as: str.nullable(), fetchPriority: str.nullable() })).max(100).optional(),
   contentType: str.nullable(), title: str.nullable(), metaDescription: str.nullable(),
   canonical: str.nullable(), robots: str.nullable(),
   headings: z.object({ h1: z.array(str).max(100), h2Count: z.number(), h3Count: z.number() }),

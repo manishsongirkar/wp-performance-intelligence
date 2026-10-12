@@ -64,6 +64,9 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions): Pr
       if (target.hostname === new URL(finalUrl).hostname) internal++; else external++;
     } catch { /* Ignore non-URL links such as mailto: and javascript:. */ }
   });
+  const preloads = $('link[rel~="preload" i]').map((_, el) => ({
+    href: new URL($(el).attr("href") ?? "", finalUrl).href.slice(0, 500), as: $(el).attr("as") ?? null, fetchPriority: $(el).attr("fetchpriority")?.toLowerCase() ?? null
+  })).get().filter((p) => p.href).slice(0, 50);
   const jsonLdScripts = $('script[type="application/ld+json"]');
   const schemaTypes = new Set<string>();
   jsonLdScripts.each((_, el) => {
@@ -120,6 +123,7 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions): Pr
     statusCode: fetched.status,
     finalUrl,
     redirectChain,
+    preloads,
     contentType,
     title,
     metaDescription,

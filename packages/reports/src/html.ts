@@ -1,4 +1,4 @@
-import type { BrowserMeasurement, ComparisonResult, Finding, LighthouseMeasurement, PageAudit } from "../../contracts/src/types.js";
+import type { BrowserMeasurement, ComparisonResult, Finding, LighthouseMeasurement, PageAudit, PsiResult } from "../../contracts/src/types.js";
 import { exactFixes, type ExactFixGroup } from "./exact-fixes.js";
 import { fixesForDifference, fixesForRule, type Fix } from "./fixes.js";
 
@@ -11,6 +11,10 @@ export interface ReportInput {
   /** `reportFiles` are relative links to Lighthouse's own standalone HTML reports, one per run. */
   lighthouse: Array<{ measurement: LighthouseMeasurement; reportFiles: string[] }>;
   failures?: string[];
+  /** Per-URL facts read from the page HTML, used to detect fixes that are already applied. */
+  pageSignals?: Record<string, { preloads: NonNullable<PageAudit["preloads"]> }>;
+  /** Google PageSpeed Insights results (opt-in), keyed by the Lighthouse URL. */
+  psi?: Record<string, { result?: PsiResult; error?: string }>;
   /** A previous run's data.json: enables before/after deltas. */
   baseline?: { generatedAt?: string; lighthouse: Array<{ measurement: LighthouseMeasurement }>; measurements: BrowserMeasurement[] };
   /** Command shown in the "Verify" fix; the CLI fills it in with the real arguments and baseline path. */
@@ -119,10 +123,63 @@ const gauge = (label: string, score: number | null, d?: { cls: string; text: str
   return `<div class="gauge ${cls}"><svg viewBox="0 0 64 64" width="84" height="84" role="img" aria-label="${esc(label)} score ${score ?? "not available"}"><circle cx="32" cy="32" r="28" class="track"/><circle cx="32" cy="32" r="28" class="arc" style="--len:${((s / 100) * C).toFixed(1)}" stroke-dasharray="${((s / 100) * C).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 32 32)"/><text x="32" y="38" text-anchor="middle">${score ?? "–"}</text></svg><div>${esc(label)}</div>${d ? `<span class="delta d-${d.cls}">${esc(d.text)}</span>` : ""}</div>`;
 };
 
+const BAND_CLS: Record<string, string> = { FAST: "good", AVERAGE: "mid", SLOW: "bad" };
+const BAND_LABEL: Record<string, string> = { FAST: "Good", AVERAGE: "Needs improvement", SLOW: "Poor" };
+
+/** PageSpeed Insights panel: Google's own lab result next to ours, plus real-user (CrUX) data when Google has it. */
+function psiPanel(m: LighthouseMeasurement, input: ReportInput, isLocalUrl: boolean): string {
+  const entry = input.psi?.[m.url];
+  if (!entry) return isLocalUrl
+    ? `<p class="muted small">PageSpeed Insights cannot test local or private URLs. This report uses the same Lighthouse engine and mobile/desktop conditions as PageSpeed Insights, so scores are comparable once the site is public.</p>`
+    : `<p class="muted small">Tick “Also compare with Google PageSpeed Insights” (CLI: <code>--psi</code>) to add Google’s own score and real-user data here.</p>`;
+  if (!entry.result) return `<div class="psi"><h4 class="sub">PageSpeed Insights</h4><p class="muted">${esc(entry.error ?? "Not available.")}</p></div>`;
+  const r = entry.result, s = m.summary;
+  const rows: Array<[string, string, number | null, number | null, (n: number) => string]> = [
+    ["Performance score", "performanceScore", s.performanceScore?.median ?? null, r.scores.performance, (n) => String(n)],
+    ["Accessibility", "accessibilityScore", s.accessibilityScore?.median ?? null, r.scores.accessibility, (n) => String(n)],
+    ["Best Practices", "bestPracticesScore", s.bestPracticesScore?.median ?? null, r.scores.bestPractices, (n) => String(n)],
+    ["SEO", "seoScore", s.seoScore?.median ?? null, r.scores.seo, (n) => String(n)],
+    ["First Contentful Paint", "fcpMs", s.fcpMs?.median ?? null, r.metrics.fcpMs, fmtMs],
+    ["Largest Contentful Paint", "lcpMs", s.lcpMs?.median ?? null, r.metrics.lcpMs, fmtMs],
+    ["Total Blocking Time", "tbtMs", s.tbtMs?.median ?? null, r.metrics.tbtMs, fmtMs],
+    ["Cumulative Layout Shift", "cls", s.cls?.median ?? null, r.metrics.cls, (n) => String(Math.round(n * 1000) / 1000)],
+    ["Speed Index", "speedIndexMs", s.speedIndexMs?.median ?? null, r.metrics.speedIndexMs, fmtMs]
+  ];
+  const fieldMetric = (label: string, f?: { p75: number; category: string }, fmt: (n: number) => string = fmtMs) => f ? `<div class="metric m-${BAND_CLS[f.category] ?? "na"}"><small>${label} (p75)</small><b>${esc(fmt(f.p75))}</b><em>${esc(BAND_LABEL[f.category] ?? f.category)}</em></div>` : "";
+  const fm = r.field?.metrics;
+  const core = fm ? [fm.lcpMs, fm.inpMs, fm.cls].filter(Boolean) as Array<{ category: string }> : [];
+  const verdict = core.length ? (core.every((c) => c.category === "FAST") ? "Passed" : "Not passed") : null;
+  return `<div class="psi"><h4 class="sub">PageSpeed Insights <small class="muted">Google · ${esc(r.strategy)} · Lighthouse ${esc(r.lighthouseVersion)} · ${esc(r.fetchedAt.slice(0, 16).replace("T", " "))} UTC</small></h4>
+${r.field && fm ? `<div class="reco"><b>Core Web Vitals assessment (real users)</b> ${verdict ? `<span class="delta d-${verdict === "Passed" ? "good" : "bad"}">${verdict}</span>` : ""} <span class="muted small">CrUX field data, ${r.field.scope === "url" ? "this URL" : "whole origin (not enough data for this URL)"}, 28-day, 75th percentile</span></div>
+<div class="metrics">${fieldMetric("LCP", fm.lcpMs)}${fieldMetric("INP", fm.inpMs)}${fieldMetric("CLS", fm.cls, (n) => String(Math.round(n * 1000) / 1000))}${fieldMetric("FCP", fm.fcpMs)}${fieldMetric("TTFB", fm.ttfbMs)}</div>` : `<p class="muted">No real-user (field) data is available for this URL or origin.</p>`}
+<div class="table-wrap"><table class="diff"><thead><tr><th>Lab metric</th><th>This tool (median)</th><th>PageSpeed Insights</th><th>Difference</th></tr></thead><tbody>${rows.map(([label, , ours, theirs, fmt]) => `<tr><td>${esc(label)}</td><td>${ours === null ? "–" : esc(fmt(ours))}</td><td>${theirs === null ? "–" : esc(fmt(theirs))}</td><td class="muted">${ours === null || theirs === null ? "" : esc(fmt === fmtMs ? (ours - theirs >= 0 ? "+" : "−") + fmtMs(Math.abs(ours - theirs)) : (ours - theirs >= 0 ? "+" : "−") + String(Math.round(Math.abs(ours - theirs) * 1000) / 1000))}</td></tr>`).join("")}</tbody></table></div>
+<p class="muted small">Expect differences: PageSpeed Insights runs on Google’s servers (different CPU and network path to your server) and may use a different Lighthouse version (${esc(r.lighthouseVersion)} there, ${esc(m.metadata.lighthouseVersion)} here). Field data is real-user history, not a test.</p></div>`;
+}
+
+const PHASE_CLS: Record<string, string> = { "TTFB": "ph1", "Load Delay": "ph2", "Load Time": "ph3", "Render Delay": "ph4" };
+/** LCP phase breakdown (as in Lighthouse / PageSpeed Insights) and the measured what-if experiment. */
+function lcpBreakdown(m: LighthouseMeasurement): string {
+  const phases = m.runs.find((r) => r.ok)?.lcpPhases ?? [], total = phases.reduce((a, p) => a + p.ms, 0);
+  const exp = m.experiments?.[0];
+  if (!total && !exp) return "";
+  return `<h4 class="sub">Why is LCP ${total ? fmtMs(total) : "slow"}? <small class="muted">LCP phases, first run</small></h4>
+${total ? `<div class="phases" role="img" aria-label="LCP phases">${phases.map((p) => `<span class="${PHASE_CLS[p.phase] ?? "ph1"}" style="flex:${Math.max(p.ms, 1)}" title="${esc(p.phase)} ${fmtMs(p.ms)}"></span>`).join("")}</div>
+<div class="legend">${phases.map((p) => `<span><i class="${PHASE_CLS[p.phase] ?? "ph1"}"></i>${esc(p.phase)} ${fmtMs(p.ms)} (${Math.round((p.ms / total) * 100)}%)</span>`).join("")}</div>` : ""}
+${exp ? `<div class="reco"><b>Measured what-if</b> ${esc(exp.description)} Simulated LCP: <b>${exp.lcpMs === null ? "?" : fmtMs(exp.lcpMs)}</b> vs ${exp.baselineLcpMs === null ? "?" : fmtMs(exp.baselineLcpMs)} now${exp.performanceScore !== null && exp.baselinePerformance !== null ? `; Performance ${exp.performanceScore} vs ${exp.baselinePerformance}` : ""}.
+<details class="fix"><summary>${exp.blocked.length} blocked images</summary><ul class="diag">${exp.blocked.map((u) => `<li><code>${esc(u)}</code></li>`).join("")}</ul></details></div>` : ""}`;
+}
+
+function diagnosticsBlock(m: LighthouseMeasurement): string {
+  const run = m.runs.find((r) => r.ok), d = run?.diagnostics ?? [];
+  if (!d.length && run?.passedAudits === undefined) return "";
+  return `<h4 class="sub">Diagnostics <small class="muted">as in PageSpeed Insights${run?.passedAudits !== undefined ? ` · ${run.passedAudits} passed audits` : ""}</small></h4>
+${d.length ? `<ul class="diag">${d.map((x) => `<li><span class="dot ${x.score !== null && x.score < 0.5 ? "bad" : "mid"}"></span><b>${esc(x.title)}</b>${x.displayValue ? ` <span class="muted">— ${esc(x.displayValue)}</span>` : ""} <span class="chip">${esc(x.id)}</span></li>`).join("")}</ul>` : '<p class="muted small">No failing diagnostics.</p>'}`;
+}
+
 function exactBlock(groups: ExactFixGroup[]): string {
   if (!groups.length) return "";
   return `<div class="exact"><h4 class="sub">Exact fixes for this page <small class="muted">generated from the measured evidence above; untested until you apply them and re-run</small></h4>
-${groups.map((g) => `<details class="exact-group" open><summary><span class="area">${esc(g.area)}</span><span class="measured">${esc(g.measured)}</span></summary>${g.fixes.map(code).join("")}</details>`).join("")}</div>`;
+${groups.map((g) => `<details class="exact-group" open><summary><span class="area">${esc(g.area)}</span><span class="measured">${esc(g.measured)}</span></summary>${g.applied?.length ? `<ul class="applied">${g.applied.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}${g.note ? `<p class="note">${esc(g.note)}</p>` : ""}${g.fixes.map(code).join("")}</details>`).join("")}</div>`;
 }
 
 function lighthouseSection(l: { measurement: LighthouseMeasurement; reportFiles: string[] }, i: number, input: ReportInput): string {
@@ -132,15 +189,18 @@ function lighthouseSection(l: { measurement: LighthouseMeasurement; reportFiles:
   const opps = m.runs.find((r) => r.ok)?.opportunities ?? [], max = Math.max(1, ...opps.map((o) => o.savingsMs));
   const br = input.measurements.find((x) => x.url === m.url && x.profile === m.profile);
   const exact = exactFixes({
-    pageUrl: m.url, evidence: m.runs.find((r) => r.ok)?.evidence ?? {}, rerunCommand: input.rerunCommand,
+    pageUrl: m.url, lcpPhases: m.runs.find((r) => r.ok)?.lcpPhases, experiments: m.experiments, viewportWidth: m.metadata.settings?.screenWidth, preloads: input.pageSignals?.[m.url]?.preloads ?? input.audits.find((a) => a.url === m.url)?.preloads, evidence: m.runs.find((r) => r.ok)?.evidence ?? {}, rerunCommand: input.rerunCommand,
     metrics: { lcpMs: s.lcpMs?.median, fcpMs: s.fcpMs?.median, tbtMs: s.tbtMs?.median, cls: s.cls?.median, ttfbMs: br?.summary.ttfbMs?.median },
     lcpElement: br?.runs.find((r) => r.ok)?.lcpElement
   });
   return `<details class="card page" id="lh-${i}" open><summary><span class="status s-neutral">LH</span><span class="url">${esc(m.url)}</span><span class="badges"><span class="chip">${esc(m.profile)}</span></span></summary><div class="card-body">
 <div class="gauges">${gauge("Performance", med("performanceScore"), dl("performanceScore"))}${gauge("Accessibility", med("accessibilityScore"), dl("accessibilityScore"))}${gauge("Best Practices", med("bestPracticesScore"), dl("bestPracticesScore"))}${gauge("SEO", med("seoScore"), dl("seoScore"))}</div>
-<div class="metrics">${metricCard("First Contentful Paint", "fcpMs", s.fcpMs, prev?.fcpMs)}${metricCard("Largest Contentful Paint", "lcpMs", s.lcpMs, prev?.lcpMs)}${metricCard("Total Blocking Time", "tbtMs", s.tbtMs, prev?.tbtMs)}${metricCard("Cumulative Layout Shift", "cls", s.cls, prev?.cls)}${metricCard("Speed Index", "speedIndexMs", s.speedIndexMs, prev?.speedIndexMs)}${metricCard("Time to Interactive", "ttiMs", s.ttiMs, prev?.ttiMs)}</div>
-<p class="muted small">Median of ${m.runs.filter((r) => r.ok).length}/${m.runs.length} successful run(s). Lighthouse ${esc(m.metadata.lighthouseVersion)}, ${esc(m.metadata.browser)}, throttling: ${esc(m.metadata.throttlingMethod)}. Lab data, not field data.${prev ? " Deltas compare medians with the baseline; changes inside the baseline's min–max range are treated as noise." : ""}</p>
+<div class="metrics">${metricCard("First Contentful Paint", "fcpMs", s.fcpMs, prev?.fcpMs)}${metricCard("Largest Contentful Paint", "lcpMs", s.lcpMs, prev?.lcpMs)}${metricCard("Total Blocking Time", "tbtMs", s.tbtMs, prev?.tbtMs)}${metricCard("Cumulative Layout Shift", "cls", s.cls, prev?.cls)}${metricCard("Speed Index", "speedIndexMs", s.speedIndexMs, prev?.speedIndexMs)}</div>
+<p class="muted small">Median of ${m.runs.filter((r) => r.ok).length}/${m.runs.length} successful run(s). Lighthouse ${esc(m.metadata.lighthouseVersion)}, ${esc(m.metadata.browser)}, throttling: ${esc(m.metadata.throttlingMethod)}${m.metadata.settings ? ` (RTT ${m.metadata.settings.rttMs ?? "?"} ms, ${m.metadata.settings.throughputKbps ?? "?"} Kbps, CPU ${m.metadata.settings.cpuSlowdownMultiplier ?? "?"}× slower, screen ${m.metadata.settings.screenWidth ?? "?"}×${m.metadata.settings.screenHeight ?? "?"})` : ""} — the same conditions PageSpeed Insights uses for its ${esc(m.profile)} lab test. Lab data, not field data.${prev ? " Deltas compare medians with the baseline; changes inside the baseline's min–max range are treated as noise." : ""}</p>
 ${l.reportFiles.length ? `<p class="links">Full Lighthouse report: ${l.reportFiles.map((f, n) => `<a class="btn" href="${esc(f)}">Run ${n + 1} ↗</a>`).join(" ")}</p>` : ""}
+${lcpBreakdown(m)}
+${psiPanel(m, input, /\.(test|local|localhost)$|^(127\.|10\.|192\.168\.)|^localhost$/i.test(new URL(m.url).hostname))}
+${diagnosticsBlock(m)}
 ${exactBlock(exact)}
 ${opps.length ? `<h4 class="sub">Lighthouse opportunities</h4>${opps.map((o) => `<article class="finding b-medium" data-sev="medium" data-text="${esc(`${o.title} ${o.id}`.toLowerCase())}"><header><h4>${esc(o.title)}</h4><span class="chip">${esc(o.id)}</span></header><div class="savings"><span style="width:${Math.round((o.savingsMs / max) * 100)}%"></span><em>est. ${fmtMs(o.savingsMs)} saved (simulated)</em></div>${exact.length ? "" : fixes(fixesForRule(o.id))}</article>`).join("")}` : ""}
 <p class="muted small">${m.limitations.map(esc).join(" ")}</p></div></details>`;
@@ -197,6 +257,9 @@ a{color:var(--brand)}main{max-width:1080px;margin:0 auto;padding:0 16px 48px}.mu
 .fail{border-left:5px solid var(--bad)}.hidden{display:none!important}.empty{display:none;text-align:center;color:var(--muted);padding:24px}.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(20px);background:#111827;color:#fff;padding:8px 16px;border-radius:20px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:50}.toast.show{opacity:1;transform:translateX(-50%)}
 .delta{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700}.d-good{background:rgba(12,206,107,.18);color:#0a7d42}.d-bad{background:rgba(255,78,66,.18);color:#c0392b}.d-flat{background:var(--soft);color:var(--muted)}
 .exact{margin-top:8px}.exact-group{border:1px solid var(--line);border-left:5px solid var(--brand);border-radius:10px;margin:10px 0;padding:0 12px 6px;background:var(--card)}.exact-group>summary{cursor:pointer;padding:10px 0;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}.area{font-weight:700}.measured{color:var(--muted);font-size:13px}
+.applied{list-style:none;margin:6px 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}.applied li{background:rgba(12,206,107,.16);color:#0a7d42;border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600}.applied li::before{content:"✓ "}
+.diag{list-style:none;margin:6px 0;padding:0}.diag li{padding:5px 0;border-bottom:1px solid var(--line);font-size:14px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;background:var(--mid)}.dot.bad{background:var(--bad)}.psi{margin-top:6px}
+.phases{display:flex;height:16px;border-radius:8px;overflow:hidden;background:var(--soft)}.phases span{display:block;min-width:3px}.ph1{background:#6366f1}.ph2{background:#f59e0b}.ph3{background:#10b981}.ph4{background:#ec4899}.legend i.ph1,.legend i.ph2,.legend i.ph3,.legend i.ph4{display:inline-block}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:24px 0}
 @media(max-width:640px){.bar-row{grid-template-columns:1fr}.bar{display:none}.gauges{justify-content:space-around}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

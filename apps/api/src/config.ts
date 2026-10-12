@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_PRIVATE_HOSTS, type NetworkPolicy } from "../../../packages/safe-fetch/src/index.js";
 
@@ -15,11 +17,13 @@ const envSchema = z.object({
   WPI_MAX_REDIRECTS: int(0, 10, 5),
   WPI_MAX_CONCURRENT: int(1, 32, 4),
   WPI_API_TOKEN: z.string().optional(),
+  WPI_REPORTS_DIR: z.string().optional(),
+  WPI_PSI_API_KEY: z.string().optional(),
   WPI_CORS_ORIGINS: list(["http://127.0.0.1:5173", "http://localhost:5173"])
 });
 
 export interface Config {
-  host: string; port: number; token?: string; corsOrigins: string[]; maxConcurrent: number;
+  host: string; port: number; token?: string; corsOrigins: string[]; maxConcurrent: number; reportsDir: string; psiApiKey?: string;
   fetch: { policy: NetworkPolicy; timeoutMs: number; maxBytes: number; maxRedirects: number };
 }
 
@@ -41,7 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!token || token.length < 16) throw new Error("Binding to a non-loopback HOST requires WPI_API_TOKEN (at least 16 characters).");
   }
   return {
-    host: e.HOST, port: e.PORT, token, corsOrigins: e.WPI_CORS_ORIGINS, maxConcurrent: e.WPI_MAX_CONCURRENT,
+    host: e.HOST, port: e.PORT, token, corsOrigins: e.WPI_CORS_ORIGINS, maxConcurrent: e.WPI_MAX_CONCURRENT, reportsDir: e.WPI_REPORTS_DIR || join(homedir(), "Desktop"), psiApiKey: e.WPI_PSI_API_KEY || undefined,
     fetch: {
       policy: { mode: e.WPI_MODE, allowedHosts: e.WPI_ALLOWED_HOSTS, privateHosts: e.WPI_MODE === "local" ? e.WPI_PRIVATE_HOSTS : [] },
       timeoutMs: e.WPI_TIMEOUT_MS, maxBytes: e.WPI_MAX_BYTES, maxRedirects: e.WPI_MAX_REDIRECTS

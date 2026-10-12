@@ -51,6 +51,15 @@ describe.skipIf(!hasBrowser)("runLighthouse (real Chromium)", () => {
     expect(m.runs[0]!.scores.performance).toBeGreaterThan(0);
     expect(m.runs[0]!.metrics.fcpMs).toBeGreaterThan(0);
     expect(m.summary.performanceScore?.samples).toBe(1);
+    expect(m.metadata.settings).toMatchObject({ rttMs: 40, cpuSlowdownMultiplier: 1 });   // Lighthouse desktop preset = PageSpeed Insights desktop
+    expect(m.runs[0]!.passedAudits).toBeGreaterThan(0);
+  }, 120_000);
+  it("uses PageSpeed Insights' mobile lab conditions (simulated slow 4G, 4x CPU slowdown)", async () => {
+    const m = await runLighthouse(base, { policy: { mode: "local", allowedHosts: [], privateHosts: ["127.0.0.1"] }, profile: "mobile", runs: 1 });
+    expect(m.metadata.throttlingMethod).toBe("simulate");
+    expect(m.metadata.settings).toMatchObject({ rttMs: 150, cpuSlowdownMultiplier: 4 });
+    expect(m.metadata.settings!.throughputKbps).toBeCloseTo(1638.4, 0);
+    expect(m.metadata.settings!.screenWidth).toBe(412);
   }, 120_000);
   it("rejects a blocked target before launching a browser", async () => {
     await expect(runLighthouse(base, { policy: { mode: "public", allowedHosts: [], privateHosts: [] } })).rejects.toMatchObject({ code: "BLOCKED_DESTINATION" });

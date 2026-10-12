@@ -56,6 +56,32 @@ describe("exactFixes", () => {
     const rel = exactFixes(ctx({ lcpElement: null, evidence: { "largest-contentful-paint-element": [{ snippet: '<img src="/wp-content/uploads/b.jpg">' }] } }));
     expect(rel[0]!.fixes[0]!.code).toContain("https://shop.test/wp-content/uploads/b.jpg");
   });
+  it("does not recommend a preload / fetchpriority that is already in place, and says so", () => {
+    const applied = ctx({
+      preloads: [{ href: `${P}/wp-content/uploads/2026/10/hero.png`, as: "image", fetchPriority: "high" }],
+      evidence: {
+        "largest-contentful-paint-element": [{ selector: "img.hero", snippet: `<img decoding="async" fetchpriority="high" class="hero" src="${P}/wp-content/uploads/2026/10/hero.png">` }],
+        "modern-image-formats": [{ url: `${P}/wp-content/uploads/2026/10/hero.png`, totalBytes: 804090, wastedBytes: 600000 }]
+      }
+    });
+    const lcp = exactFixes(applied).find((g) => g.area.startsWith("LCP"))!;
+    expect(lcp.applied).toEqual(expect.arrayContaining(["Preload for the LCP image is present", 'fetchpriority="high" is set on the LCP image', "The LCP image is not lazy-loaded"]));
+    const titles = lcp.fixes.map((f) => f.title).join("\n");
+    expect(titles).not.toMatch(/Preload the LCP image/); expect(titles).not.toMatch(/high priority/);
+    expect(titles).toMatch(/LCP image itself is heavy/);                       // the real remaining lever
+    expect(lcp.fixes.map((f) => f.code).join("\n")).toContain("cwebp -q 82 'wp-content/uploads/2026/10/hero.png'");
+    expect(lcp.note).toContain("remaining LCP time is mostly the image download");
+  });
+  it("still asks for the missing half, and for removing lazy-loading", () => {
+    const only = (snippet: string, preloaded: boolean) => exactFixes(ctx({
+      preloads: preloaded ? [{ href: `${P}/wp-content/uploads/2026/10/hero.png`, as: "image", fetchPriority: null }] : [],
+      evidence: { "largest-contentful-paint-element": [{ snippet }] }
+    })).find((g) => g.area.startsWith("LCP"))!.fixes.map((f) => f.title).join("\n");
+    const src = `src="${P}/wp-content/uploads/2026/10/hero.png"`;
+    expect(only(`<img fetchpriority="high" ${src}>`, false)).toMatch(/Preload the LCP image/);
+    expect(only(`<img ${src}>`, true)).toMatch(/high priority/);
+    expect(only(`<img loading="lazy" fetchpriority="high" ${src}>`, true)).toMatch(/Remove loading="lazy"/);
+  });
   it("returns nothing when there is no evidence", () => expect(exactFixes({ pageUrl: P, evidence: {}, metrics: {} })).toEqual([]));
 
   it("never lets hostile site data break out of the generated code", () => {

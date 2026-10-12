@@ -30,6 +30,15 @@ pnpm wpi report --audit https://example.com --lighthouse https://example.com   #
 
 Checks: `pnpm typecheck` (backend `.ts` and frontend `.tsx`), `pnpm test`, `pnpm build` (type-check + production build of the dashboard). CI (`.github/workflows/ci.yml`) runs all three.
 
+## Web interface
+
+```bash
+NODE_USE_SYSTEM_CA=1 npm run ui     # builds the dashboard, starts the API, prints the URL
+# open http://127.0.0.1:4178/
+```
+
+Enter URLs, optional old/new comparisons (or import a CSV), device profile, runs per page and an optional earlier report as the baseline, then press **Run report**. The report runs in the background (one at a time, extra requests queue); the card below the form shows live step progress and, when it finishes, the report link with **Copy link** and **Export** buttons: JSON (`data.json`), Spreadsheet (`.xlsx`: Summary, Findings, Performance, Opportunities) and HTML (`report.html`). Reports are saved to `WPI_REPORTS_DIR` (default `~/Desktop`), in a `<site>_<date-time>` folder, and appear under "Earlier reports" after a restart. Local mode only; jobs are held in memory and cancelling stops a job before its next step, not mid-step. For UI development run `npm run dev` and `npm run dev:web` separately.
+
 ## HTML reports
 
 ```bash
@@ -43,6 +52,10 @@ Writes `~/Desktop/<site>_<YYYY-MM-DD_HH-mm-ss>/` (override the parent with `--ou
 - `data.json`: the raw results.
 
 **Exact fixes.** For each Lighthouse page the report adds an "Exact fixes for this page" block for LCP, FCP, TBT, unused CSS/JS, images and CLS. The code is built from the measured evidence of that run: the real LCP image URL (preload and `fetchpriority`), the real render-blocking and heavy script files (async/defer lists with sizes), unused CSS/JS files (with a warning when a file is mostly used and must not be dequeued), and the exact image files to convert or regenerate. Fixes are scoped to the audited URL, every site-derived value is allow-listed and escaped before it reaches code, and the generated PHP and bash are syntax-checked in the tests. They are still untested on your site: apply them on staging, then re-run with the baseline.
+
+**PageSpeed Insights alignment.** Lighthouse runs with PageSpeed Insights' lab conditions (mobile: Moto G Power emulation, simulated slow 4G with 150 ms RTT / 1.6 Mbps and 4× CPU slowdown; desktop: the desktop preset), recorded in each report. Metric ratings use the same Good / Needs improvement / Poor bands, and the Performance section has PageSpeed-style Opportunities, Diagnostics and a passed-audit count. Add `--psi` (UI: "Also compare with Google PageSpeed Insights") to fetch Google's own result for **public** URLs: its lab scores next to yours, plus real-user (CrUX) Core Web Vitals. This sends the URL to Google, so it is opt-in; set `WPI_PSI_API_KEY` to avoid quota errors. Local/private URLs (LocalWP) cannot be tested by PageSpeed Insights.
+
+**Why is LCP slow?** Each Lighthouse page shows the LCP phase breakdown (TTFB, Load Delay, Load Time, Render Delay). When Load Delay dominates and several heavy images load at the same time, the report runs one extra what-if Lighthouse pass with those images blocked and shows the measured LCP difference. The exact fixes detect what is already applied (preload, `fetchpriority`, lazy-loading, `srcset`) and do not repeat it. The tool does not recommend changes that could hurt other breakpoints (for example `fetchpriority="low"` on images that may be above the fold on desktop).
 
 **Before/after.** `--baseline <previous report folder>` adds deltas to the new report. Each report's "Verify" block contains the exact re-run command. Changes inside the baseline's own min–max range, or too small to matter, are shown as "no clear change".
 
@@ -63,6 +76,7 @@ Invalid values stop startup with an error; nothing silently falls back to a weak
 | `WPI_MAX_REDIRECTS` | `5` | Max redirect hops |
 | `WPI_MAX_CONCURRENT` | `4` | Concurrent fetch slots (a comparison uses 2); excess requests get HTTP 429 |
 | `WPI_API_TOKEN` | unset | If set (min 16 chars), `/api/*` requires `Authorization: Bearer <token>` |
+| `WPI_REPORTS_DIR` | `~/Desktop` | Where report folders are written and served from (local mode) |
 | `WPI_CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173` | Browser origins allowed to call the API; others get 403 |
 
 ## Network modes and security

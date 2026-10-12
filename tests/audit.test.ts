@@ -46,6 +46,16 @@ describe("auditPage rules", () => {
   });
 });
 
+describe("preload detection", () => {
+  it("extracts preload links with resolved URLs, type and fetchpriority", async () => {
+    const a = await audit('<html><head><link rel="preload" as="image" href="/hero.png" fetchpriority="HIGH"><link rel="preload" href="/f.woff2" as="font"><link rel="stylesheet" href="/s.css"></head></html>');
+    expect(a.preloads).toEqual([
+      { href: "https://old.example.com/hero.png", as: "image", fetchPriority: "high" },
+      { href: "https://old.example.com/f.woff2", as: "font", fetchPriority: null }
+    ]);
+  });
+});
+
 describe("old vs new comparison from fixtures", () => {
   it("reports title, description, canonical, noindex, schema, H1 and alt regressions", async () => {
     const [o, n] = [await audit(fx("old-page.html")), await audit(fx("new-page.html"), "https://new.example.com/")];
