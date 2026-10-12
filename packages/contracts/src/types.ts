@@ -29,7 +29,15 @@ export interface PageAudit {
   finalUrl: string;
   redirectChain: string[];
   /** <link rel="preload"> tags found in the HTML (used to tell which fixes are already applied). */
-  preloads?: Array<{ href: string; as: string | null; fetchPriority: string | null }>;
+  preloads?: Array<{ href: string; as: string | null; fetchPriority: string | null; /** URLs listed in imagesrcset (responsive preload). */ srcsetUrls?: string[] }>;
+  /** <script src> tags with their loading attributes (to avoid recommending what the page already does). */
+  scripts?: Array<{ src: string; defer: boolean; async: boolean; module: boolean }>;
+  /** Stylesheets; `async` = loaded without blocking render (preload-as-style or media=print swap). */
+  stylesheets?: Array<{ href: string; async: boolean }>;
+  /** <img> tags (first 60) with their loading hints, to know whether the LCP image is prioritised or lazy-loaded. */
+  imgTags?: Array<{ src: string; srcsetUrls: string[]; fetchPriority: string | null; loading: string | null }>;
+  /** Origins already given <link rel="preconnect">. */
+  preconnects?: string[];
   contentType: string | null;
   title: string | null;
   metaDescription: string | null;
@@ -129,6 +137,10 @@ export interface LighthouseRun {
   /** PageSpeed-Insights-style "Diagnostics": failing audits that are not opportunities. */
   /** LCP broken into TTFB / Load Delay / Load Time / Render Delay (ms), as in Lighthouse and PageSpeed Insights. */
   lcpPhases?: Array<{ phase: string; ms: number }>;
+  /** Lighthouse 13's own checks of how the LCP image is discovered (fetchpriority, lazy-loading, in the initial HTML). */
+  lcpDiscovery?: { priorityHinted?: boolean; requestDiscoverable?: boolean; eagerlyLoaded?: boolean };
+  /** Lighthouse's CPU benchmark of the machine that ran the test (PageSpeed Insights' servers score roughly 500-900). */
+  benchmarkIndex?: number;
   diagnostics?: Array<{ id: string; title: string; displayValue?: string; score: number | null }>;
   passedAudits?: number;
   /** Keyed by Lighthouse audit id, e.g. "unused-css-rules". Only audits that failed or list items. */
@@ -159,6 +171,8 @@ export interface LighthouseMeasurement {
   metadata: {
     lighthouseVersion: string; browser: string; throttlingMethod: string; formFactor: string; runs: number;
     /** Effective Lighthouse settings, to compare with PageSpeed Insights' lab conditions. */
+    /** Median CPU benchmark of this machine over the runs; a low or varying value means the machine was busy. */
+    benchmarkIndex?: number;
     settings?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number; screenWidth?: number; screenHeight?: number; deviceScaleFactor?: number; userAgent?: string };
   };
   runs: LighthouseRun[];
@@ -167,17 +181,4 @@ export interface LighthouseMeasurement {
   experiments?: LighthouseExperiment[];
   /** Full Lighthouse HTML report per run; only present when requested (large). */
   htmlReports?: string[];
-}
-
-export interface PsiFieldMetric { p75: number; category: string }
-/** Result of Google's PageSpeed Insights API (lab = Lighthouse on Google's servers, field = CrUX real-user data). */
-export interface PsiResult {
-  strategy: BrowserProfileName;
-  fetchedAt: string;
-  lighthouseVersion: string;
-  finalUrl: string;
-  scores: { performance: number | null; accessibility: number | null; bestPractices: number | null; seo: number | null };
-  metrics: { fcpMs: number | null; lcpMs: number | null; tbtMs: number | null; cls: number | null; speedIndexMs: number | null };
-  field: null | { scope: "url" | "origin"; overall: string | null; metrics: { lcpMs?: PsiFieldMetric; inpMs?: PsiFieldMetric; cls?: PsiFieldMetric; fcpMs?: PsiFieldMetric; ttfbMs?: PsiFieldMetric } };
-  opportunities: Array<{ id: string; title: string; savingsMs: number }>;
 }

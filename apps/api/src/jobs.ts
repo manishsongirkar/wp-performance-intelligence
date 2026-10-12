@@ -17,7 +17,7 @@ export interface Job {
   error?: string;
 }
 
-type Runner = (req: ReportRequest, hooks: ReportHooks) => Promise<{ dir: string; file: string; folder: string; failures: string[] }>;
+type Runner = (req: ReportRequest, hooks: ReportHooks) => Promise<{ dir: string; file: string; folder: string; failures: string[]; stepCount: number }>;
 
 /** In-memory, one job at a time (a browser run is heavy). Jobs are lost on restart; finished reports stay on disk. */
 export function createJobManager(run: Runner, opts: { maxQueued?: number } = {}) {
@@ -41,12 +41,17 @@ export function createJobManager(run: Runner, opts: { maxQueued?: number } = {})
         shouldCancel: () => cancels.has(job.id)
       });
       job.folder = out.folder; job.filePath = out.file; job.failures = out.failures;
-      job.status = "done";
+      // A report where every check failed is not a success, even though the (failure-only) report file exists.
+      const allFailed = out.stepCount > 0 && out.failures.length >= out.stepCount;
+      job.status = allFailed ? "failed" : "done";
+      if (allFailed) job.error = `Every check failed: ${out.failures[0] ?? "see the report's Failures section"}`;
     } catch (e) {
       job.status = cancels.has(job.id) ? "cancelled" : "failed";
       job.error = cancels.has(job.id) ? "Cancelled before finishing; no report was written." : e instanceof Error ? e.message : "Report failed.";
     } finally {
       job.finishedAt = new Date().toISOString();
+      cancels.delete(job.id);
+      for (const old of [...jobs.keys()].slice(0, Math.max(0, jobs.size - 50))) jobs.delete(old);   // bounded history
       busy = false;
       void pump();
     }

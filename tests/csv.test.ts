@@ -27,7 +27,7 @@ describe("parseUrlCsv edge cases", () => {
   it("reports row-level errors with row numbers and keeps good rows", () => {
     const r = parseUrlCsv("url\nhttps://a.com/\n\nftp://x.com/\njavascript:alert(1)\nnot a url");
     expect(r.urls).toEqual(["https://a.com/"]);
-    expect(r.errors).toHaveLength(3); expect(r.errors[0]).toContain("Row 3");
+    expect(r.errors).toHaveLength(3); expect(r.errors[0]).toContain("Row 4");   // physical line numbers: the blank line 3 is counted
   });
   it("dedupes URLs and validates both sides of a pair", () => {
     expect(parseUrlCsv("url\nhttps://a.com/\nhttps://a.com/").urls).toHaveLength(1);

@@ -6,7 +6,7 @@ import { chromium } from "playwright";
 import { renderHtmlReport, esc, type ReportInput } from "../packages/reports/src/html.js";
 import { fixesForRule, fixesForDifference } from "../packages/reports/src/fixes.js";
 import { reportFolderName } from "../apps/api/src/report-cli.js";
-import type { PageAudit } from "../packages/contracts/src/types.js";
+import type { BrowserMeasurement, PageAudit } from "../packages/contracts/src/types.js";
 
 const XSS = `<img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script>`;
 const audit = (): PageAudit => ({
@@ -29,7 +29,7 @@ describe("report helpers", () => {
   it("has fix examples for known rules and comparison titles, none for unknown", () => {
     expect(fixesForRule("seo.canonical.missing").length).toBeGreaterThan(0);
     expect(fixesForRule("modern-image-formats").length).toBeGreaterThan(0);
-    expect(fixesForDifference("Canonical URL changed").length).toBeGreaterThan(0);
+    expect(fixesForDifference("Canonical URL changed", { newValue: null }).length).toBeGreaterThan(0);
     expect(fixesForRule("nope")).toEqual([]);
   });
   it("never emits untrusted markup unescaped", () => {
@@ -87,4 +87,32 @@ describe.skipIf(!hasBrowser)("report in headless Chromium", () => {
       await expect.poll(() => page.locator(".copy").first().textContent()).toBe("Copied!");
     } finally { await browser.close(); }
   }, 30_000);
+});
+
+describe("browser-measurement section: LCP image advice is state-aware, never a generic template", () => {
+  const U = "https://stage.example/wp-content/uploads";
+  const measurement = (url = "https://stage.example/"): BrowserMeasurement => ({
+    schemaVersion: "1.0.0", source: "lab", url, finalUrl: url, measuredAt: "x", profile: "mobile", status: "complete",
+    metadata: { browser: "chromium", playwrightVersion: "1", userAgent: "ua", viewport: { width: 412, height: 915 }, deviceScaleFactor: 2, throttling: "none", cache: "cold (fresh context per run)", runs: 1, timeoutMs: 1 },
+    runs: [{ ok: true, httpStatus: 200, ttfbMs: 1, fcpMs: 1, lcpMs: 480, lcpElement: { tag: "IMG", url: `${U}/hero-1536x682.webp` }, cls: 0, domContentLoadedMs: 1, loadMs: 1, requestCount: 1, transferBytes: 1, slowestResources: [], blockedRequests: 0 }],
+    summary: { lcpMs: { median: 480, min: 480, max: 480, samples: 1 } }, limitations: []
+  });
+  const page = (over: Partial<PageAudit>): PageAudit => ({ ...audit(), url: "https://stage.example/", findings: [], ...over });
+  const html = (a: PageAudit | null, signals?: ReportInput["pageSignals"]) => renderHtmlReport({ audits: a ? [a] : [], comparisons: [], measurements: [measurement()], lighthouse: [], pageSignals: signals });
+  const applied = { preloads: [{ href: `${U}/hero.webp`, as: "image", fetchPriority: "high", srcsetUrls: [`${U}/hero-1536x682.webp`] }], imgTags: [{ src: `${U}/hero.webp`, srcsetUrls: [`${U}/hero-1536x682.webp`], fetchPriority: "high", loading: null }] };
+
+  it("shows 'already applied' and no preload/priority suggestion when the page has them", () => {
+    for (const out of [html(page(applied)), html(null, { "https://stage.example/": applied })]) {
+      expect(out).not.toContain("Prioritise the LCP image"); expect(out).not.toMatch(/Preload the LCP image|high priority and eager/);
+      expect(out).toContain("Preload for the LCP image is present"); expect(out).toContain("fetchpriority=&quot;high&quot; is set on the LCP image");
+    }
+  });
+  it("offers the exact fix (for this image) when the page lacks it", () => {
+    const out = html(page({ preloads: [], imgTags: [{ src: `${U}/hero.webp`, srcsetUrls: [`${U}/hero-1536x682.webp`], fetchPriority: null, loading: null }] }));
+    expect(out).toContain("Preload the LCP image on this page"); expect(out).toContain("hero-1536x682.webp"); expect(out).not.toContain("Prioritise the LCP image");
+  });
+  it("says so (instead of guessing) when the page HTML could not be read", () => {
+    const out = html(null);
+    expect(out).toContain("Could not read the page HTML to check for an existing preload"); expect(out).not.toContain("high priority and eager");
+  });
 });

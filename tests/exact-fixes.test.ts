@@ -7,7 +7,7 @@ import type { LighthouseMeasurement } from "../packages/contracts/src/types.js";
 const P = "https://shop.test";
 const ctx = (over: Partial<ExactFixContext> = {}): ExactFixContext => ({
   pageUrl: `${P}/about-us/`, rerunCommand: "pnpm wpi report --lighthouse https://shop.test/about-us/ --baseline /tmp/x",
-  metrics: { lcpMs: 12600, fcpMs: 1350, tbtMs: 300, cls: 0.2, ttfbMs: 900 },
+  metrics: { lcpMs: 12600, fcpMs: 2500, tbtMs: 300, cls: 0.2, ttfbMs: 900 },   // FCP above the Good limit (1.8 s), so render-blocking advice applies
   lcpElement: { tag: "IMG", url: `${P}/wp-content/uploads/2026/10/hero.png` },
   evidence: {
     "render-blocking-resources": [{ url: `${P}/wp-content/themes/t/main.css?ver=1`, wastedMs: 310, totalBytes: 15009 }, { url: `${P}/wp-content/plugins/p/app.js?ver=2`, wastedMs: 120, totalBytes: 9000 }],
@@ -69,7 +69,9 @@ describe("exactFixes", () => {
     const titles = lcp.fixes.map((f) => f.title).join("\n");
     expect(titles).not.toMatch(/Preload the LCP image/); expect(titles).not.toMatch(/high priority/);
     expect(titles).toMatch(/LCP image itself is heavy/);                       // the real remaining lever
-    expect(lcp.fixes.map((f) => f.code).join("\n")).toContain("cwebp -q 82 'wp-content/uploads/2026/10/hero.png'");
+    const convert = lcp.fixes.find((f) => /Convert this exact file/.test(f.title))!.code;
+    expect(convert).toContain("https://shop.test/wp-content/uploads/2026/10/hero.png");        // downloaded by URL: works from any folder
+    expect(convert).toContain("cwebp -quiet -q 82");
     expect(lcp.note).toContain("remaining LCP time is mostly the image download");
   });
   it("still asks for the missing half, and for removing lazy-loading", () => {

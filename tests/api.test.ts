@@ -138,3 +138,17 @@ describe("CORS, host and auth", () => {
     expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
   });
 });
+
+describe("config is strict", () => {
+  it.each([{ PORT: " 4000 " }, { PORT: "1e3" }, { PORT: "0x10" }, { PORT: "40.5" }, { WPI_TIMEOUT_MS: "5e3" }, { WPI_MAX_BYTES: "1_000_000" }])("rejects %o", (env) => expect(() => loadConfig(env)).toThrow(/Invalid configuration/));
+  it("requires a long token whenever one is set, even on loopback", () => {
+    for (const t of ["abc", "   ", "x".repeat(15)]) { if (t.trim()) expect(() => loadConfig({ WPI_API_TOKEN: t })).toThrow(/at least 16/); }
+    expect(loadConfig({ WPI_API_TOKEN: "   " }).token).toBeUndefined();                       // blank means "no token", not a weak one
+    expect(loadConfig({ WPI_API_TOKEN: "x".repeat(16) }).token).toBeTruthy();
+  });
+  it("normalises CORS origins (trailing slash) and ignores a blank reports dir", () => {
+    expect(loadConfig({ WPI_CORS_ORIGINS: "http://127.0.0.1:5173/, http://localhost:5173//" }).corsOrigins).toEqual(["http://127.0.0.1:5173", "http://localhost:5173"]);
+    expect(loadConfig({ WPI_REPORTS_DIR: "   " }).reportsDir).toMatch(/Desktop$/);
+  });
+  it("accepts an IPv6 loopback bind", () => expect(loadConfig({ HOST: "[::1]" }).host).toBe("[::1]"));
+});

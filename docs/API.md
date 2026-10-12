@@ -1,6 +1,6 @@
 # API
 
-JSON over HTTP. Default `http://127.0.0.1:4178`. If `WPI_API_TOKEN` is set, send `Authorization: Bearer <token>` to `/api/*`.
+JSON over HTTP. Default `http://127.0.0.1:4178`. If `WPI_API_TOKEN` is set (at least 16 characters), every route except `/health`, the dashboard (`/`, `/assets/*`) and `/reports/*` needs `Authorization: Bearer <token>`. The check uses the decoded path, so percent-encoded variants (`/%61pi/…`) cannot bypass it. Responses carry `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 | Endpoint | Request | Success |
 |---|---|---|
@@ -24,11 +24,12 @@ Types: `packages/contracts/src/types.ts`; export input is validated by `packages
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/jobs` `{ audits, measures, lighthouse: string[], compares: [{oldUrl,newUrl}], runs: 1-5, profile, baseline?: "<report folder>", psi?: boolean }` | Queue a background report. `psi: true` also queries Google PageSpeed Insights for each Lighthouse URL (public URLs only). 202 `{ job }`; 400 on invalid input; 429 when the queue is full. At least one URL is required (max 20 per list, 10 comparisons). |
+| `POST /api/jobs` `{ audits, measures, lighthouse: string[], compares: [{oldUrl,newUrl}], runs: 1-5, profiles: ["mobile","desktop"] (1-2; default ["desktop"]; the older single `profile` is still accepted), baseline?: "<report folder>" }` | Queue a background report. 202 `{ job }`; 400 on invalid input; 429 when the queue is full. At least one URL is required (max 20 per list, 10 comparisons). |
 | `GET /api/jobs`, `GET /api/jobs/:id` | Job status: `queued/running/done/failed/cancelled`, per-step state, `folder`, `filePath`, `failures`. |
 | `POST /api/jobs/:id/cancel` | Cancel a queued job now, or a running one before its next step. |
-| `GET /api/reports` | Earlier report folders in `WPI_REPORTS_DIR` (newest first, max 50). |
-| `GET /reports/:folder/:file` | `report.html`, `data.json` or `lighthouse-N-runM.html` only. Folder names must match `<site>_<YYYY-MM-DD_HH-mm-ss>`; anything else is 404. |
+| `GET /api/history` | Everything the dashboard needs for the progress charts and the report list: `{ reports: [{ folder, at, title, reportUrl, urls, tools, failures, headline }], points: [{ folder, at, url, device, kind: "lighthouse"\|"browser"\|"audit", values }] }`. Newest 60 reports; unreadable `data.json` files are skipped (the report is still listed). |
+| `GET /api/reports` | Earlier report folders in `WPI_REPORTS_DIR` (newest first, max 50). Kept for compatibility; the dashboard uses `/api/history`. |
+| `GET /reports/:folder/:file` | `report.html`, `data.json` or `lighthouse-N-<mobile\|desktop>-runM.html` (older `lighthouse-N-runM.html` too) only. Folder names must match `<site>_<YYYY-MM-DD_HH-mm-ss>`; anything else is 404. |
 | `GET /reports/:folder/export/{json,xlsx,html}` | Download as an attachment. |
 
 The dashboard (`GET /`) is served by the same origin, so no CORS is involved.

@@ -48,6 +48,7 @@ function classifyV4([a, b, c]: number[]): IpClass {
   if (a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168) || (a === 100 && b! >= 64 && b! <= 127)) return "private";
   if (a === 0 || a === 169 && b === 254 || a! >= 224) return "blocked"; // unspecified, link-local/metadata, multicast, reserved, broadcast
   if (a === 192 && b === 0 && (c === 0 || c === 2)) return "blocked";
+  if (a === 192 && b === 88 && c === 99) return "blocked"; // 6to4 relay anycast (deprecated)
   if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return "blocked";
   if (a === 203 && b === 0 && c === 113) return "blocked";
   return "public";
@@ -68,6 +69,8 @@ export function classifyIp(ip: string): IpClass {
   if (b[0] === 0xfd && b[1] === 0 && b[2] === 0x0e && b[3] === 0xc2) return "blocked"; // AWS IPv6 metadata fd00:ec2::254
   if ((b[0]! & 0xfe) === 0xfc) return "private"; // fc00::/7
   if (b[0] === 0x20 && b[1] === 0x01 && ((b[2] === 0 && b[3] === 0) || (b[2] === 0x0d && b[3] === 0xb8))) return "blocked"; // Teredo, documentation
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && (b[3] === 0x02 || (b[3]! & 0xf0) === 0x10)) return "blocked"; // 2001:2::/48 benchmarking, 2001:10::/28 ORCHID
+  if (b[0] === 0x3f && b[1] === 0xff && (b[2]! & 0xf0) === 0) return "blocked"; // 3fff::/20 documentation
   if ((b[0]! & 0xe0) !== 0x20) return "blocked"; // only 2000::/3 is global unicast
   return "public";
 }
@@ -83,7 +86,7 @@ export function hostMatches(hostname: string, list: string[]): boolean {
  * Validates a URL against the policy and resolves it. The returned address is the one the
  * connection MUST use (see fetch.ts), which is what defeats DNS rebinding.
  */
-export async function validateDestination(url: URL, policy: NetworkPolicy, resolve: Resolver = systemResolver): Promise<{ address: string; family: 4 | 6 }> {
+export async function validateDestination(url: URL, policy: NetworkPolicy, resolve: Resolver = systemResolver): Promise<{ address: string; family: 4 | 6; /** Every validated address, in resolver order (the connection may fall back to the next one). */ all: Array<{ address: string; family: 4 | 6 }> }> {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new SafeFetchError("INVALID_URL", "Only HTTP and HTTPS URLs are supported.");
   if (url.username || url.password) throw new SafeFetchError("INVALID_URL", "URLs containing credentials are not allowed.");
   const host = bare(url.hostname);
@@ -104,6 +107,6 @@ export async function validateDestination(url: URL, policy: NetworkPolicy, resol
     if (cls === "public" || (mayBePrivate && (cls === "private" || cls === "loopback"))) continue;
     throw new SafeFetchError("BLOCKED_DESTINATION", `Host ${host} resolves to a disallowed address.`);
   }
-  const first = addresses[0]!;
-  return { address: first.address, family: first.family === 6 ? 6 : 4 };
+  const all = addresses.map((a) => ({ address: a.address, family: (a.family === 6 ? 6 : 4) as 4 | 6 }));
+  return { address: all[0]!.address, family: all[0]!.family, all };
 }

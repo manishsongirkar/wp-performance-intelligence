@@ -1,6 +1,8 @@
 import { load } from "cheerio";
 import { randomUUID } from "node:crypto";
 import { safeFetch, type SafeFetchOptions } from "../../safe-fetch/src/index.js";
+import { isNoindex } from "../../contracts/src/robots.js";
+import { parseSrcset } from "./srcset.js";
 import type { Finding, PageAudit, Severity } from "../../contracts/src/types.js";
 
 export type FetchPageOptions = Omit<SafeFetchOptions, "wantBody">;
@@ -44,30 +46,51 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions): Pr
   const text = fetched.body.toString("utf8");
   const $ = load(text);
   const findings: Finding[] = [...early];
-  const title = $("title").first().text().trim() || null;
-  const metaDescription = $('meta[name="description" i]').attr("content")?.trim() || null;
-  const canonical = $('link[rel~="canonical" i]').attr("href")?.trim() || null;
-  const robots = $('meta[name="robots" i]').attr("content")?.trim() || fetched.headers["x-robots-tag"];
-  const h1 = $("h1").map((_, el) => $(el).text().trim()).get().filter(Boolean);
+  // URLs resolve against <base href> when the page has one, exactly as a browser does.
+  const baseHref = (() => { const b = $("base[href]").first().attr("href"); try { return b ? new URL(b, finalUrl).href : finalUrl; } catch { return finalUrl; } })();
+  const abs = (v: string | undefined) => { try { return v ? new URL(v, baseHref).href.slice(0, 500) : ""; } catch { return ""; } };
+  const srcsetUrls = (v: string | undefined) => parseSrcset(v).filter((u) => !/^data:/i.test(u)).map(abs).filter(Boolean).slice(0, 30);
+  const clip = (v: string | null | undefined, n = 1000) => (v ? v.slice(0, n) : null);
+
+  const title = clip($("title").first().text().trim() || null);
+  const metaDescription = clip($('meta[name="description" i]').attr("content")?.trim() || null);
+  const canonical = clip($('link[rel~="canonical" i]').attr("href")?.trim() || null, 500);
+  // Every source can block indexing, and any one of them is enough: the meta tag does not override the X-Robots-Tag header.
+  const robotsParts = [$('meta[name="robots" i]').attr("content"), $('meta[name="googlebot" i]').attr("content"), fetched.headers["x-robots-tag"]].map((v) => v?.trim()).filter((v): v is string => !!v);
+  const robots = robotsParts.length ? [...new Set(robotsParts)].join(", ").slice(0, 500) : undefined;
+  const h1 = $("h1").map((_, el) => $(el).text().trim().slice(0, 500)).get().filter(Boolean);
   const h2Count = $("h2").length;
   const h3Count = $("h3").length;
   const images = $("img");
-  const missingAlt = images.filter((_, el) => !$(el).attr("alt")?.trim()).length;
+  // Missing = no alt attribute at all. alt="" is valid (decorative), as is role=presentation / aria-hidden.
+  const missingAlt = images.filter((_, el) => {
+    const img = $(el), role = (img.attr("role") ?? "").toLowerCase();
+    return img.attr("alt") === undefined && role !== "presentation" && role !== "none" && img.attr("aria-hidden") !== "true";
+  }).length;
   const missingDimensions = images.filter((_, el) => !$(el).attr("width") || !$(el).attr("height")).length;
   const anchors = $("a[href]");
   let internal = 0;
   let external = 0;
   anchors.each((_, el) => {
     try {
-      const target = new URL($(el).attr("href")!, finalUrl);
+      const target = new URL($(el).attr("href")!, baseHref);
       if (!/^https?:$/.test(target.protocol)) return;
       if (target.hostname === new URL(finalUrl).hostname) internal++; else external++;
     } catch { /* Ignore non-URL links such as mailto: and javascript:. */ }
   });
+  // A preload with only imagesrcset (no href) is valid; one with neither is dropped.
   const preloads = $('link[rel~="preload" i]').map((_, el) => ({
-    href: new URL($(el).attr("href") ?? "", finalUrl).href.slice(0, 500), as: $(el).attr("as") ?? null, fetchPriority: $(el).attr("fetchpriority")?.toLowerCase() ?? null
-  })).get().filter((p) => p.href).slice(0, 50);
-  const jsonLdScripts = $('script[type="application/ld+json"]');
+    href: abs($(el).attr("href")), as: $(el).attr("as") ?? null, fetchPriority: $(el).attr("fetchpriority")?.toLowerCase() ?? null,
+    srcsetUrls: srcsetUrls($(el).attr("imagesrcset"))
+  })).get().filter((p) => p.href || p.srcsetUrls.length).slice(0, 50);
+  const scripts = $("script[src]").map((_, el) => ({ src: abs($(el).attr("src")), defer: $(el).attr("defer") !== undefined, async: $(el).attr("async") !== undefined, module: ($(el).attr("type") ?? "").toLowerCase() === "module" })).get().filter((x) => x.src).slice(0, 300);
+  const stylesheets = $('link[rel~="stylesheet" i], link[rel~="preload" i][as="style" i]').map((_, el) => {
+    const rel = ($(el).attr("rel") ?? "").toLowerCase(), media = ($(el).attr("media") ?? "").toLowerCase();
+    return { href: abs($(el).attr("href")), async: rel.includes("preload") || (media === "print" && $(el).attr("onload") !== undefined) };
+  }).get().filter((x) => x.href).slice(0, 300);
+  const imgTags = $("img").map((_, el) => ({ src: abs($(el).attr("src")), srcsetUrls: srcsetUrls($(el).attr("srcset")), fetchPriority: $(el).attr("fetchpriority")?.toLowerCase() ?? null, loading: $(el).attr("loading")?.toLowerCase() ?? null })).get().filter((x) => (x.src && !/^data:/i.test(x.src)) || x.srcsetUrls.length).slice(0, 60);
+  const preconnects = [...new Set($('link[rel~="preconnect" i]').map((_, el) => { try { return new URL($(el).attr("href") ?? "", baseHref).origin; } catch { return ""; } }).get().filter(Boolean))].slice(0, 50);
+  const jsonLdScripts = $('script[type^="application/ld+json" i]');
   const schemaTypes = new Set<string>();
   jsonLdScripts.each((_, el) => {
     try {
@@ -99,12 +122,12 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions): Pr
     severity: "medium",
     confidence: "high",
     title: `${missingAlt} image(s) missing alt attributes`,
-    description: "One or more images have no alt attribute. Decorative images may intentionally use an empty alt attribute.",
+    description: "One or more images have no alt attribute at all. (An empty alt=\"\" is valid for decorative images and is not counted.)",
     url: inputUrl,
-    evidence: [{ type: "html", description: "Image elements without a non-empty alt attribute", value: missingAlt }],
+    evidence: [{ type: "html", description: "Image elements without an alt attribute", value: missingAlt }],
     recommendation: "Review each image and add meaningful alternative text for informative images; use alt=\"\" for decorative images."
   }));
-  if (robots && /noindex/i.test(robots)) findings.push(makeFinding({
+  if (isNoindex(robots)) findings.push(makeFinding({
     ruleId: "seo.robots.noindex",
     category: "seo",
     severity: "high",
@@ -123,7 +146,7 @@ export async function auditPage(inputUrl: string, options: FetchPageOptions): Pr
     statusCode: fetched.status,
     finalUrl,
     redirectChain,
-    preloads,
+    preloads, scripts, stylesheets, imgTags, preconnects,
     contentType,
     title,
     metaDescription,

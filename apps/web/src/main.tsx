@@ -1,18 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { HistorySection, type HistoryPoint, type HistoryReport } from "./history.js";
 
 type StepState = "queued" | "running" | "done" | "failed";
 interface Job { id: string; status: "queued" | "running" | "done" | "failed" | "cancelled"; createdAt: string; finishedAt?: string; title: string; steps: Array<{ label: string; state: StepState; error?: string }>; folder?: string; filePath?: string; failures?: string[]; error?: string }
-interface PastReport { folder: string; createdAt: string; url: string }
 interface Pair { oldUrl: string; newUrl: string }
 
 // Same origin when served by the API; direct to the API when running `vite` on :5173.
 const BASE = location.port === "5173" ? "http://127.0.0.1:4178" : "";
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { ...init, headers: { "content-type": "application/json" } });
+  // Only declare JSON when there is a body: Fastify rejects an empty body that claims to be JSON (this broke Cancel).
+  const res = await fetch(`${BASE}${path}`, { ...init, headers: init?.body ? { "content-type": "application/json" } : {} });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+  if (!res.ok) {
+    const fields = Object.entries((data.details?.fieldErrors ?? {}) as Record<string, string[]>).flatMap(([k, v]) => v.map((m) => `${k}: ${m}`));
+    throw new Error([data.error ?? `Request failed (${res.status})`, ...fields.slice(0, 3)].join(" · "));
+  }
   return data as T;
 }
 
@@ -58,7 +62,7 @@ function JobCard({ job, onCancel }: { job: Job; onCancel: (id: string) => void }
       <ul className="steps">{job.steps.map((s, i) => <li key={i} className={`s-${s.state}`}><span className="ico" aria-hidden="true">{ICON[s.state]}</span><span className="lbl">{s.label}</span>{s.error && <em> {s.error}</em>}</li>)}</ul>
       {job.status === "queued" && <p className="muted small">Waiting for the running report to finish…</p>}
       {job.error && <p className="err">{job.error}</p>}
-      {job.status === "done" && link && (
+      {(job.status === "done" || job.status === "failed") && link && (
         <div className="result">
           <a className="btn primary" href={link} target="_blank" rel="noopener">Open report ↗</a>
           <input readOnly value={link} aria-label="Report link" onFocus={(e) => e.currentTarget.select()} />
@@ -72,6 +76,13 @@ function JobCard({ job, onCancel }: { job: Job; onCancel: (id: string) => void }
   );
 }
 
+/** Defined at module level on purpose: a component declared inside App is a new type on every render and remounts (the textarea lost focus after each keystroke). */
+function List({ id, label, value, set, hint }: { id: string; label: string; value: string; set: (v: string) => void; hint?: string }) {
+  return (
+    <div className="field"><label htmlFor={id}>{label}</label><textarea id={id} rows={4} value={value} onChange={(e) => set(e.target.value)} placeholder={"https://example.com/\nhttps://example.com/about/"} spellCheck={false} />{hint && <small className="muted">{hint}</small>}</div>
+  );
+}
+
 function App() {
   const [same, setSame] = useState(true);
   const [urls, setUrls] = useState("");
@@ -81,24 +92,25 @@ function App() {
   const [lights, setLights] = useState("");
   const [pairs, setPairs] = useState<Pair[]>([]);
   const [runs, setRuns] = useState(3);
-  const [profile, setProfile] = useState<"desktop" | "mobile">("mobile");
+  const [devices, setDevices] = useState({ mobile: true, desktop: false });
   const [baseline, setBaseline] = useState("");
-  const [psi, setPsi] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [past, setPast] = useState<PastReport[]>([]);
+  const [history, setHistory] = useState<{ reports: HistoryReport[]; points: HistoryPoint[] }>({ reports: [], points: [] });
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [j, r] = await Promise.all([api<{ jobs: Job[] }>("/api/jobs"), api<{ reports: PastReport[] }>("/api/reports")]);
-      setJobs(j.jobs); setPast(r.reports);
-    } catch (e) { setError(e instanceof Error ? e.message : "Cannot reach the API."); }
+      const [j, h] = await Promise.all([api<{ jobs: Job[] }>("/api/jobs"), api<{ reports: HistoryReport[]; points: HistoryPoint[] }>("/api/history")]);
+      setJobs(j.jobs); setHistory(h); setLoadError("");   // a recovered connection clears its own message
+    } catch (e) { setLoadError(e instanceof Error ? e.message : "Cannot reach the API."); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const anyActive = jobs.some((j) => j.status === "queued" || j.status === "running");
   useEffect(() => { if (!anyActive) return; const t = setInterval(() => void refresh(), 1500); return () => clearInterval(t); }, [anyActive, refresh]);
 
+  const profiles = (["mobile", "desktop"] as const).filter((p) => devices[p]);
   const request = useMemo(() => {
     const list = lines(urls);
     return {
@@ -106,13 +118,19 @@ function App() {
       measures: same ? (tools.measure ? list : []) : lines(measures),
       lighthouse: same ? (tools.lighthouse ? list : []) : lines(lights),
       compares: pairs.filter((p) => p.oldUrl.trim() || p.newUrl.trim()).map((p) => ({ oldUrl: p.oldUrl.trim(), newUrl: p.newUrl.trim() })),
-      runs, profile, psi, ...(baseline ? { baseline } : {})
+      runs, ...(profiles.length ? { profiles } : {}), ...(baseline ? { baseline } : {})
     };
-  }, [same, urls, tools, audits, measures, lights, pairs, runs, profile, baseline, psi]);
+  }, [same, urls, tools, audits, measures, lights, pairs, runs, profiles, baseline]);
 
   const bad = [...request.audits, ...request.measures, ...request.lighthouse, ...request.compares.flatMap((p) => [p.oldUrl, p.newUrl])].filter((u) => !isHttp(u));
-  const total = request.audits.length + request.measures.length + request.lighthouse.length + request.compares.length;
-  const canRun = total > 0 && bad.length === 0 && !busy;
+  const browserChecks = request.measures.length + request.lighthouse.length;
+  const total = request.audits.length + request.compares.length + browserChecks * Math.max(profiles.length, 1);
+  const needsDevice = browserChecks > 0 && profiles.length === 0;
+  const lists = [request.audits, request.measures, request.lighthouse];
+  const tooMany = lists.some((l) => l.length > 20) ? "At most 20 URLs per list." : request.compares.length > 10 ? "At most 10 comparisons." : "";
+  const halfPair = request.compares.some((p) => !p.oldUrl || !p.newUrl) ? "Fill in both the old and the new URL of each comparison (or remove the row)." : "";
+  const problem = tooMany || halfPair;
+  const canRun = total > 0 && bad.length === 0 && !needsDevice && !problem && !busy;
 
   async function run(e: React.FormEvent) {
     e.preventDefault(); setError(""); setBusy(true);
@@ -131,9 +149,6 @@ function App() {
   }
   const setPair = (i: number, patch: Partial<Pair>) => setPairs((p) => p.map((x, n) => (n === i ? { ...x, ...patch } : x)));
 
-  const List = ({ id, label, value, set, hint }: { id: string; label: string; value: string; set: (v: string) => void; hint?: string }) => (
-    <div className="field"><label htmlFor={id}>{label}</label><textarea id={id} rows={4} value={value} onChange={(e) => set(e.target.value)} placeholder={"https://example.com/\nhttps://example.com/about/"} spellCheck={false} />{hint && <small className="muted">{hint}</small>}</div>
-  );
 
   return (
     <>
@@ -169,15 +184,20 @@ function App() {
 
           <h2>3. Options</h2>
           <div className="opts">
-            <div className="field"><label htmlFor="profile">Device profile</label><select id="profile" value={profile} onChange={(e) => setProfile(e.target.value as "desktop" | "mobile")}><option value="mobile">Mobile</option><option value="desktop">Desktop</option></select></div>
-            <div className="field"><label htmlFor="runs">Runs per page</label><select id="runs" value={runs} onChange={(e) => setRuns(Number(e.target.value))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}{n === 3 ? " (recommended)" : n === 1 ? " (noisy)" : ""}</option>)}</select></div>
-            <div className="field"><label htmlFor="baseline">Compare with a previous report</label><select id="baseline" value={baseline} onChange={(e) => setBaseline(e.target.value)}><option value="">None</option>{past.map((r) => <option key={r.folder} value={r.folder}>{r.folder}</option>)}</select></div>
+            <fieldset className="devices"><legend>Device profiles</legend>
+              <label className="check"><input type="checkbox" checked={devices.mobile} onChange={(e) => setDevices({ ...devices, mobile: e.target.checked })} /> Mobile <small>simulated slow 4G</small></label>
+              <label className="check"><input type="checkbox" checked={devices.desktop} onChange={(e) => setDevices({ ...devices, desktop: e.target.checked })} /> Desktop</label>
+            </fieldset>
+            <div className="field"><label htmlFor="runs">Runs per page</label><select id="runs" value={runs} onChange={(e) => setRuns(Number(e.target.value))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}{n === 3 ? " (recommended)" : n === 1 ? " (noisy)" : n === 5 ? " (most stable)" : ""}</option>)}</select></div>
+            <div className="field"><label htmlFor="baseline">Compare with a previous report</label><select id="baseline" value={baseline} onChange={(e) => setBaseline(e.target.value)}><option value="">None</option>{history.reports.map((r) => <option key={r.folder} value={r.folder}>{r.folder}</option>)}</select></div>
           </div>
 
-          <label className="check psi"><input type="checkbox" checked={psi} onChange={(e) => setPsi(e.target.checked)} /> Also compare with Google PageSpeed Insights <small>adds Google’s score and real-user (field) data; sends the URL to Google; public sites only, not LocalWP</small></label>
+          {problem && <p className="err" role="alert">{problem}</p>}
+          {needsDevice && <p className="err" role="alert">Select at least one device (Mobile or Desktop) for Lighthouse and browser measurement.</p>}
           {bad.length > 0 && <p className="err" role="alert">Not a valid http(s) URL: {bad.slice(0, 3).join(", ")}{bad.length > 3 ? "…" : ""}</p>}
           {error && <p className="err" role="alert">{error}</p>}
-          <div className="actions"><button type="submit" className="btn primary big" disabled={!canRun}>{busy ? "Starting…" : "Run report"}</button><span className="muted small">{total} check{total === 1 ? "" : "s"} · about 1–2 minutes per page with 3 runs</span></div>
+          {loadError && <p className="err" role="alert">Cannot load reports: {loadError}</p>}
+          <div className="actions"><button type="submit" className="btn primary big" disabled={!canRun}>{busy ? "Starting…" : "Run report"}</button><span className="muted small">{total} check{total === 1 ? "" : "s"} · about 1–2 minutes per page and device with 3 runs</span></div>
         </form>
 
         <section id="jobs"><h2 className="sec">Reports</h2>
@@ -185,8 +205,7 @@ function App() {
           {jobs.map((j) => <JobCard key={j.id} job={j} onCancel={cancel} />)}
         </section>
 
-        {past.length > 0 && <section><h2 className="sec">Earlier reports <small className="muted">saved on disk</small></h2>
-          <ul className="past">{past.map((r) => <li key={r.folder}><a href={`${BASE}${r.url}`} target="_blank" rel="noopener">{r.folder}</a><span className="muted small">{new Date(r.createdAt).toLocaleString()}</span><ExportLinks folder={r.folder} /><button type="button" className="btn ghost" onClick={() => { setBaseline(r.folder); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Use as baseline</button></li>)}</ul></section>}
+        <HistorySection reports={history.reports} points={history.points} base={BASE} onBaseline={(folder) => { setBaseline(folder); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
         <footer>Lab data from a local browser, not field Core Web Vitals. Reports are saved to your reports folder (default: Desktop).</footer>
       </main>
     </>

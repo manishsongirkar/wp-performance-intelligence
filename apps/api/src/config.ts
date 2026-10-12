@@ -4,7 +4,8 @@ import { z } from "zod";
 import { DEFAULT_PRIVATE_HOSTS, type NetworkPolicy } from "../../../packages/safe-fetch/src/index.js";
 
 const list = (fallback: string[] = []) => z.string().optional().transform((v) => (v === undefined ? fallback : v.split(",").map((s) => s.trim()).filter(Boolean)));
-const int = (min: number, max: number, def: number) => z.coerce.number().int().min(min).max(max).default(def);
+// Strict digits only: " 4000 ", "1e3" and "0x10" are rejected instead of silently becoming surprising numbers.
+const int = (min: number, max: number, def: number) => z.string().regex(/^\d+$/, "must be a whole number").transform(Number).pipe(z.number().min(min).max(max)).optional().transform((v) => v ?? def);
 
 const envSchema = z.object({
   WPI_MODE: z.enum(["local", "public"]).default("local"),
@@ -17,13 +18,12 @@ const envSchema = z.object({
   WPI_MAX_REDIRECTS: int(0, 10, 5),
   WPI_MAX_CONCURRENT: int(1, 32, 4),
   WPI_API_TOKEN: z.string().optional(),
-  WPI_REPORTS_DIR: z.string().optional(),
-  WPI_PSI_API_KEY: z.string().optional(),
-  WPI_CORS_ORIGINS: list(["http://127.0.0.1:5173", "http://localhost:5173"])
+  WPI_REPORTS_DIR: z.string().optional().transform((v) => v?.trim() || undefined),
+  WPI_CORS_ORIGINS: list(["http://127.0.0.1:5173", "http://localhost:5173"]).transform((o) => o.map((x) => x.replace(/\/+$/, "")))
 });
 
 export interface Config {
-  host: string; port: number; token?: string; corsOrigins: string[]; maxConcurrent: number; reportsDir: string; psiApiKey?: string;
+  host: string; port: number; token?: string; corsOrigins: string[]; maxConcurrent: number; reportsDir: string;
   fetch: { policy: NetworkPolicy; timeoutMs: number; maxBytes: number; maxRedirects: number };
 }
 
@@ -39,13 +39,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) throw new Error(`Invalid configuration: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   const e = parsed.data;
-  const token = e.WPI_API_TOKEN || undefined;
+  const token = e.WPI_API_TOKEN?.trim() || undefined;
+  if (token && token.length < 16) throw new Error("WPI_API_TOKEN must be at least 16 characters.");
   if (!isLoopbackHost(e.HOST)) {
     if (e.WPI_MODE !== "public") throw new Error("Binding to a non-loopback HOST requires WPI_MODE=public.");
     if (!token || token.length < 16) throw new Error("Binding to a non-loopback HOST requires WPI_API_TOKEN (at least 16 characters).");
   }
   return {
-    host: e.HOST, port: e.PORT, token, corsOrigins: e.WPI_CORS_ORIGINS, maxConcurrent: e.WPI_MAX_CONCURRENT, reportsDir: e.WPI_REPORTS_DIR || join(homedir(), "Desktop"), psiApiKey: e.WPI_PSI_API_KEY || undefined,
+    host: e.HOST, port: e.PORT, token, corsOrigins: e.WPI_CORS_ORIGINS, maxConcurrent: e.WPI_MAX_CONCURRENT, reportsDir: e.WPI_REPORTS_DIR || join(homedir(), "Desktop"),
     fetch: {
       policy: { mode: e.WPI_MODE, allowedHosts: e.WPI_ALLOWED_HOSTS, privateHosts: e.WPI_MODE === "local" ? e.WPI_PRIVATE_HOSTS : [] },
       timeoutMs: e.WPI_TIMEOUT_MS, maxBytes: e.WPI_MAX_BYTES, maxRedirects: e.WPI_MAX_REDIRECTS

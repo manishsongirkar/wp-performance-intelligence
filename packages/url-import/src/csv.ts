@@ -1,13 +1,18 @@
 import type { UrlPair } from "../../contracts/src/types.js";
 
+interface CsvRow { cells: string[]; /** 1-based line in the file where the row starts (blank lines and multi-line cells counted). */ line: number }
+
 /** RFC 4180-style parser: quoted fields may contain commas, quotes ("") and newlines. */
-function parseCsvRows(text: string): string[][] {
-  const rows: string[][] = [];
+function parseCsvRows(text: string): CsvRow[] {
+  const rows: CsvRow[] = [];
   let row: string[] = [];
   let value = "";
   let quoted = false;
+  let line = 1, rowLine = 1;
+  const endRow = () => { row.push(value.trim()); rows.push({ cells: row, line: rowLine }); row = []; value = ""; rowLine = line; };
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
+    if (ch === "\n" || (ch === "\r" && text[i + 1] !== "\n")) line++;           // CRLF counts once; a lone CR or LF counts once
     if (quoted) {
       if (ch !== '"') value += ch;
       else if (text[i + 1] === '"') { value += '"'; i++; }
@@ -16,20 +21,23 @@ function parseCsvRows(text: string): string[][] {
     else if (ch === ",") { row.push(value.trim()); value = ""; }
     else if (ch === "\n" || ch === "\r") {
       if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(value.trim()); rows.push(row); row = []; value = "";
+      endRow();
     } else value += ch;
   }
   if (quoted) throw new Error("CSV contains an unclosed quoted field.");
-  row.push(value.trim()); rows.push(row);
-  return rows.filter((r) => r.some((c) => c));
+  endRow();
+  return rows.filter((r) => r.cells.some((c) => c));
 }
+
+/** "Old URL", "old-url" and "OLD_URL" are all the same header. */
+const headerKey = (h: string) => h.trim().toLowerCase().replace(/[\s-]+/g, "_");
 
 export function parseUrlCsv(csv: string): { mode: "urls" | "pairs"; urls: string[]; pairs: UrlPair[]; errors: string[] } {
   const parsedRows = parseCsvRows(csv.replace(/^\uFEFF/, ""));
   if (parsedRows.length < 2) throw new Error("CSV must contain a header and at least one data row.");
-  const headers = parsedRows[0]!.map((h) => h.toLowerCase());
+  const headers = parsedRows[0]!.cells.map(headerKey);
   const errors: string[] = [];
-  const rows = parsedRows.slice(1).map((cells, index) => ({ cells, rowNumber: index + 2 }));
+  const rows = parsedRows.slice(1).map((r) => ({ cells: r.cells, rowNumber: r.line }));
   const oldIndex = headers.indexOf("old_url");
   const newIndex = headers.indexOf("new_url");
   const urlIndex = headers.indexOf("url");
