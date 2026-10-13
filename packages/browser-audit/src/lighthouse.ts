@@ -44,6 +44,22 @@ export function toEvidence(id: string, items: RawItem[]): EvidenceItem[] {
     .filter((e) => Object.keys(e).length);
 }
 
+type Chain = { url?: string; request?: { url?: string; startTime?: number; endTime?: number; transferSize?: number }; navStartToEndTime?: number; transferSize?: number; children?: Record<string, Chain> };
+/** Lighthouse 13 ("network-dependency-tree-insight") and 12 ("critical-request-chains") describe the request chain in different shapes. */
+export function networkTree(A: Record<string, Audit>): LighthouseRun["networkTree"] {
+  const d = A["network-dependency-tree-insight"]?.details ?? A["critical-request-chains"]?.details;
+  const roots: Chain[] = d?.items ? (d.items as Array<{ value?: { chains?: Record<string, Chain> } }>).flatMap((i) => Object.values(i.value?.chains ?? {})) : Object.values((d?.chains ?? {}) as Record<string, Chain>);
+  if (!roots.length) return undefined;
+  const nodes: NonNullable<LighthouseRun["networkTree"]>["nodes"] = []; let maxDepth = 0, longestMs = 0;
+  const walk = (c: Chain, depth: number, t0: number) => {
+    const url = c.url ?? c.request?.url; const ms = c.navStartToEndTime ?? (c.request?.endTime !== undefined ? (c.request.endTime - t0) * 1000 : 0);
+    if (url) { maxDepth = Math.max(maxDepth, depth); longestMs = Math.max(longestMs, ms); if (nodes.length < 30) nodes.push({ url: url.slice(0, 300), depth, ms: Math.round(ms), ...(numOrU(c.transferSize ?? c.request?.transferSize) !== undefined ? { bytes: numOrU(c.transferSize ?? c.request?.transferSize) } : {}) }); }
+    Object.values(c.children ?? {}).forEach((k) => walk(k, depth + 1, t0));
+  };
+  roots.forEach((r) => walk(r, 0, r.request?.startTime ?? 0));
+  return nodes.length ? { maxDepth, longestMs, nodes } : undefined;
+}
+
 const EMPTY: LighthouseRun = {
   ok: false, scores: { performance: null, accessibility: null, bestPractices: null, seo: null },
   metrics: { fcpMs: null, lcpMs: null, tbtMs: null, cls: null, speedIndexMs: null, ttiMs: null }, opportunities: [], runWarnings: [], evidence: {}
@@ -143,7 +159,7 @@ export function runFromLhr(lhr: Lhr): LighthouseRun {
     metrics: { fcpMs: num("first-contentful-paint"), lcpMs: num("largest-contentful-paint"), tbtMs: num("total-blocking-time"), cls: A["cumulative-layout-shift"]?.numericValue ?? null, speedIndexMs: num("speed-index"), ttiMs: num("interactive") },
     opportunities, runWarnings: (lhr.runWarnings ?? []).map(String).slice(0, 5), diagnostics, passedAudits,
     lcpPhases: insightPhases.length ? insightPhases : lcpPhases(A["largest-contentful-paint-element"]?.details),
-    ...(lcpDiscovery ? { lcpDiscovery } : {}), ...(typeof lhr.environment?.benchmarkIndex === "number" ? { benchmarkIndex: Math.round(lhr.environment.benchmarkIndex) } : {}),
+    ...(lcpDiscovery ? { lcpDiscovery } : {}), ...(networkTree(A) ? { networkTree: networkTree(A) } : {}), ...(typeof lhr.environment?.benchmarkIndex === "number" ? { benchmarkIndex: Math.round(lhr.environment.benchmarkIndex) } : {}),
     evidence
   };
 }

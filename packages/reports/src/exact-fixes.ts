@@ -21,6 +21,8 @@ export interface ExactFixContext {
   /** Lighthouse 13's own checks of how the LCP image is discovered: authoritative for the rendered page. */
   lcpDiscovery?: { priorityHinted?: boolean; requestDiscoverable?: boolean; eagerlyLoaded?: boolean };
   experiments?: LighthouseExperiment[];
+  /** Request chain behind the page (Lighthouse network dependency tree). */
+  networkTree?: { maxDepth: number; longestMs: number; nodes: Array<{ url: string; depth: number; ms: number; bytes?: number }> };
   /** Emulated viewport width in CSS px (to tell whether an image is full-bleed). */
   viewportWidth?: number;
   /** Shell command that re-runs this report against the saved baseline. */
@@ -512,6 +514,109 @@ fi`),
     }] : [],
     note: shifting.length ? `Lighthouse attributes the layout shifts to: ${shifting.map((s) => cmt(s)).join("; ")}. Give those elements a reserved size (width/height, aspect-ratio or min-height) so nothing moves when they load.` : undefined
   });
+
+
+  // ================= Network dependency tree =================
+  const tree = ctx.networkTree;
+  if (tree && tree.maxDepth >= 1) {
+    const nodes = tree.nodes.filter((n) => safeUrl(n.url));
+    const already = (u: string) => (ctx.preloads ?? []).some((p) => pathOf(p.href) === pathOf(u)) || fonts.some((f) => f.url === u);
+    // Fonts and stylesheets found at depth 1 or more are discovered late (via CSS or script): preloading them starts the request with the HTML.
+    const late = nodes.filter((n) => n.depth >= 1 && (fontType(n.url) || (n.depth >= 2 && /\.css(\?|$)/i.test(n.url))) && !already(n.url)).slice(0, 3);   // many preloads compete with the page's own rendering
+    const origins = [...new Set(nodes.filter((n) => n.depth >= 1 && !same(n.url, ctx.pageUrl)).map((n) => originOf(n.url)).filter(Boolean))]
+      .filter((o) => !(ctx.preconnects ?? []).includes(o) && !pre.includes(o)).slice(0, 2);
+    const tfix: Fix[] = [];
+    if (late.length) tfix.push({
+      title: "Preload the files that are found late in the chain (starts them with the HTML)", language: "php",
+      code: `add_action( 'wp_head', function () {
+	if ( ! ( ${cond} ) ) {
+		return;
+	}
+${late.map((n) => fontType(n.url)
+  ? `\techo '<link rel="preload" as="font" type="${fontType(n.url)}" crossorigin href="' . esc_url( ${php(n.url)} ) . '">' . "\\n"; // ${cmt(`level ${n.depth + 1}, done at ${secs(n.ms)}`)}`
+  : `\techo '<link rel="preload" as="style" href="' . esc_url( ${php(n.url)} ) . '">' . "\\n"; // ${cmt(`level ${n.depth + 1}, done at ${secs(n.ms)}`)}`).join("\n")}
+}, 1 );`,
+      note: "Preloaded files must really be used on this page, or the browser warns and wastes bandwidth. Each file is limited to this page."
+    });
+    if (origins.length) tfix.push({
+      title: "Preconnect to the other origins in the chain", language: "php",
+      code: `add_filter( 'wp_resource_hints', function ( $urls, $relation ) {
+	if ( 'preconnect' === $relation ) {
+${origins.map((o) => `\t\t$urls[] = array( 'href' => ${php(o)}, 'crossorigin' => 'anonymous' );`).join("\n")}
+	}
+	return $urls;
+}, 10, 2 );`
+    });
+    if (tfix.length) groups.push({
+      area: "Network dependency tree", measured: `${tree.maxDepth + 1} levels deep · longest chain ${secs(tree.longestMs)} · ${late.length} late file(s)`, fixes: tfix,
+      note: `Longest chain: ${nodes.slice(0, 4).map((n) => pathOf(n.url).split("/").pop()).join(" → ")}`
+    });
+  }
+
+  // ================= Long main-thread tasks =================
+  const longTasks = urlItems(ev["long-tasks"]).filter((i) => (i.durationMs ?? 0) >= 50 && /\.js(\?|$)/i.test(i.url!) && !boot.some((b) => b.url === i.url));
+  if (longTasks.length) {
+    const outside = longTasks.filter((i) => !same(i.url!, ctx.pageUrl)), inside = longTasks.filter((i) => same(i.url!, ctx.pageUrl) && !alreadyDeferred(i.url!));
+    const lfix: Fix[] = [];
+    if (outside.length) lfix.push({
+      title: "Run these third-party scripts only after the first user input (removes their long tasks from page load)", language: "php",
+      code: `add_filter( 'script_loader_tag', function ( $tag, $handle, $src ) {
+	if ( ! ( ${cond} ) ) {
+		return $tag;
+	}
+	$delay = array(
+${lines(outside, (i) => `long task ${secs(i.durationMs)}`, php, "\t\t")}
+	);
+	foreach ( $delay as $needle ) {
+		if ( false !== strpos( $src, $needle ) ) {
+			return '<script type="text/plain" data-wpi-delay="' . esc_url( $src ) . '"></script>' . "\\n";
+		}
+	}
+	return $tag;
+}, 10, 3 );
+add_action( 'wp_footer', function () {
+	?>
+	<script>
+	( function () {
+		var started = false;
+		function start() {
+			if ( started ) {
+				return;
+			}
+			started = true;
+			document.querySelectorAll( 'script[data-wpi-delay]' ).forEach( function ( old ) {
+				var s = document.createElement( 'script' );
+				s.src = old.getAttribute( 'data-wpi-delay' );
+				s.async = false;
+				old.parentNode.replaceChild( s, old );
+			} );
+		}
+		[ 'pointerdown', 'keydown', 'scroll', 'touchstart' ].forEach( function ( e ) {
+			window.addEventListener( e, start, { once: true, passive: true } );
+		} );
+	} )();
+	</script>
+	<?php
+}, 99 );`,
+      note: "Analytics and chat scripts work this way. If a script has inline code that calls it at once (a `-after` inline script), that code errors until the first input: check the console, and leave such a script out of the list."
+    });
+    if (inside.length) lfix.push({
+      title: "Defer these first-party scripts that cause long tasks", language: "php",
+      code: `add_filter( 'script_loader_tag', function ( $tag, $handle, $src ) {
+	$defer = array(
+${lines(inside, (i) => `long task ${secs(i.durationMs)}`, php, "\t\t")}
+	);
+	foreach ( $defer as $needle ) {
+		if ( false !== strpos( $src, $needle ) && false === strpos( $tag, ' defer' ) && false === strpos( $tag, ' async' ) ) {
+			return str_replace( ' src=', ' defer src=', $tag );
+		}
+	}
+	return $tag;
+}, 10, 3 );`,
+      note: "Deferring moves the work after parsing but does not shorten it. If the long task remains, load the script only on pages that use it (wp_dequeue_script)."
+    });
+    if (lfix.length) groups.push({ area: "Long main-thread tasks", measured: `${longTasks.length} script(s) with tasks over 50 ms · longest ${secs(Math.max(...longTasks.map((i) => i.durationMs ?? 0)))}`, fixes: lfix });
+  }
 
   if (groups.length && ctx.rerunCommand) groups.push({ area: "Verify the improvement", measured: "Apply on staging first, then re-run to compare against this report.", fixes: [{ title: "Re-run and show before/after deltas", language: "bash", code: ctx.rerunCommand }] });
   return groups;

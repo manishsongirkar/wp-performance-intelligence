@@ -144,3 +144,27 @@ describe("report with exact fixes and baseline", () => {
     expect(html).toContain("metrics better");
   });
 });
+
+describe("network dependency tree and long tasks", () => {
+  const g = exactFixes(ctx({
+    networkTree: { maxDepth: 2, longestMs: 900, nodes: [
+      { url: `${P}/about-us/`, depth: 0, ms: 100 }, { url: `${P}/wp-content/themes/t/main.css`, depth: 1, ms: 300 },
+      { url: `${P}/wp-content/themes/t/Geist.woff2`, depth: 2, ms: 900 }, { url: "https://cdn.example.com/lib.js", depth: 1, ms: 500 }
+    ] },
+    evidence: { "long-tasks": [{ url: "https://www.googletagmanager.com/gtm.js?id=GTM-1", durationMs: 180 }, { url: `${P}/wp-content/plugins/p/slider.js`, durationMs: 90 }] }
+  }));
+  it("preloads late files, preconnects other origins, and delays third-party long-task scripts", () => {
+    const t = g.find((x) => x.area === "Network dependency tree")!, l = g.find((x) => x.area === "Long main-thread tasks")!;
+    expect(t.fixes[0]!.code).toContain("Geist.woff2");
+    expect(t.fixes[0]!.code).not.toContain("main.css");             // depth 1 stylesheet is linked in the HTML: not "late"
+    expect(t.fixes[1]!.code).toContain("https://cdn.example.com");
+    expect(l.fixes[0]!.code).toContain("/gtm.js");
+    expect(l.fixes[1]!.code).toContain("/wp-content/plugins/p/slider.js");
+  });
+  it.skipIf(spawnSync("php", ["-v"]).status !== 0)("generated PHP has valid syntax", () => {
+    for (const f of g.flatMap((x) => x.fixes).filter((x) => x.language === "php")) {
+      const r = spawnSync("php", ["-l"], { input: `<?php\n${f.code}`, encoding: "utf8" });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+    }
+  });
+});

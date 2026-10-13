@@ -143,6 +143,8 @@ export interface LighthouseRun {
   benchmarkIndex?: number;
   diagnostics?: Array<{ id: string; title: string; displayValue?: string; score: number | null }>;
   passedAudits?: number;
+  /** Request chain behind the page (Lighthouse "network dependency tree" / "critical request chains"), depth-first, capped. */
+  networkTree?: { maxDepth: number; longestMs: number; nodes: Array<{ url: string; depth: number; ms: number; bytes?: number }> };
   /** Keyed by Lighthouse audit id, e.g. "unused-css-rules". Only audits that failed or list items. */
   evidence: Record<string, EvidenceItem[]>;
 }

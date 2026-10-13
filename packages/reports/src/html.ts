@@ -186,7 +186,7 @@ function lighthouseSection(l: { measurement: LighthouseMeasurement; reportFiles:
   const opps = m.runs.find((r) => r.ok)?.opportunities ?? [], max = Math.max(1, ...opps.map((o) => o.savingsMs));
   const br = input.measurements.find((x) => x.url === m.url && x.profile === m.profile);
   const exact = exactFixes({
-    pageUrl: m.url, ...pageFacts(input, m.url), lcpPhases: m.runs.find((r) => r.ok)?.lcpPhases, lcpDiscovery: m.runs.find((r) => r.ok)?.lcpDiscovery, experiments: m.experiments, viewportWidth: m.metadata.settings?.screenWidth, evidence: m.runs.find((r) => r.ok)?.evidence ?? {}, rerunCommand: input.rerunCommand,
+    pageUrl: m.url, ...pageFacts(input, m.url), lcpPhases: m.runs.find((r) => r.ok)?.lcpPhases, lcpDiscovery: m.runs.find((r) => r.ok)?.lcpDiscovery, networkTree: m.runs.find((r) => r.ok)?.networkTree, experiments: m.experiments, viewportWidth: m.metadata.settings?.screenWidth, evidence: m.runs.find((r) => r.ok)?.evidence ?? {}, rerunCommand: input.rerunCommand,
     metrics: { lcpMs: s.lcpMs?.median, fcpMs: s.fcpMs?.median, tbtMs: s.tbtMs?.median, cls: s.cls?.median, ttfbMs: br?.summary.ttfbMs?.median },
     lcpElement: br?.runs.find((r) => r.ok)?.lcpElement
   });
